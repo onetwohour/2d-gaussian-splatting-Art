@@ -1,7 +1,7 @@
 expname: vangogh
 
 data:
-  val_downscale: 2    # downscale image for validation
+  downscale: 2        # downscale image for training
 
 finetune:
   src_text: "photo"

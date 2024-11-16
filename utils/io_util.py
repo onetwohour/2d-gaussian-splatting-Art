@@ -282,7 +282,6 @@ def load_config(args, unknown, base_config_path=None):
     if found_k is not None:
         unknown.remove(found_k)
 
-    print("=> Parse extra configs: ", unknown)
     if args.resume_dir is not None:
         assert args.config is None, "given --config will not be used when given --resume_dir"
         assert '--expname' not in unknown, "given --expname with --resume_dir will lead to unexpected behavior."
@@ -308,33 +307,10 @@ def load_config(args, unknown, base_config_path=None):
         # use configs given by command line to further overwrite current config
         config = update_config(config, unknown)
 
-        # use the expname and log_root_dir to get the experiement directory
-        if 'exp_dir' not in config.training:
-            config.training.exp_dir = os.path.join(config.training.log_root_dir, config.expname)
-
     # add other configs in args to config
     other_dict = vars(args)
     other_dict.pop('config')
     other_dict.pop('resume_dir')
     config.update(other_dict)
-
-    if hasattr(args, 'ddp') and args.ddp:
-        if config.device_ids != -1:
-            print("=> Ignoring device_ids configs when using DDP. Auto set to -1.")
-            config.device_ids = -1
-    else:
-        args.ddp = False
-        # # device_ids: -1 will be parsed as using all available cuda device
-        # # device_ids: [] will be parsed as using all available cuda device
-        if (type(config.device_ids) == int and config.device_ids == -1) \
-                or (type(config.device_ids) == list and len(config.device_ids) == 0):
-            config.device_ids = list(range(torch.cuda.device_count()))
-        # # e.g. device_ids: 0 will be parsed as device_ids [0]
-        elif isinstance(config.device_ids, int):
-            config.device_ids = [config.device_ids]
-        # # e.g. device_ids: 0,1 will be parsed as device_ids [0,1]
-        elif isinstance(config.device_ids, str):
-            config.device_ids = [int(m) for m in config.device_ids.split(',')]
-        print("=> Use cuda devices: {}".format(config.device_ids))
 
     return config
