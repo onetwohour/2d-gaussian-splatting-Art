@@ -40,7 +40,14 @@ git clone https://github.com/onetwohour/2d-gaussian-splatting-Art.git --recursiv
 cd 2d-gaussian-splatting-Art
 ```
 
-2. Install the dependencies:
+2. Set up CUDA (for GPU usage):
+
+```
+# if use CUDA 11.7
+pip install torch==2.0.0+cu117 torchaudio==2.0.0 torchvision==0.15.0 -f https://download.pytorch.org/whl/torch_stable.html
+```
+
+3. Install the dependencies:
 
 ```
 pip install ninja
@@ -49,13 +56,6 @@ pip install submodules/diff-surfel-rasterization
 pip install ftfy regex tqdm
 pip install git+https://github.com/openai/CLIP.git
 pip install -r requirements.txt
-```
-
-3. Set up CUDA (for GPU usage):
-
-```
-# if use CUDA 11.7
-pip install torch==2.0.0+cu117 torchaudio==2.0.0 torchvision==0.15.0 -f https://download.pytorch.org/whl/torch_stable.html
 ```
 
 4. Train
