@@ -7,7 +7,6 @@ import glob
 import addict
 import shutil
 import imageio
-import argparse
 import functools
 import numpy as np
 
@@ -222,95 +221,17 @@ def load_yaml(path, default_path=None):
 
     return config
 
-
-def save_config(datadict: ForceKeyErrorDict, path: str):
-    datadict = copy.deepcopy(datadict)
-    datadict.training.ckpt_file = None
-    datadict.training.pop('exp_dir')
-    with open(path, 'w', encoding='utf8') as outfile:
-        yaml.dump(datadict.to_dict(), outfile, default_flow_style=False)
-
-
-def update_config(config, unknown):
-    # update config given args
-    for idx, arg in enumerate(unknown):
-        if arg.startswith("--"):
-            if (':') in arg:
-                k1, k2 = arg.replace("--", "").split(':')
-                argtype = type(config[k1][k2])
-                if argtype == bool:
-                    v = unknown[idx+1].lower() == 'true'
-                else:
-                    if config[k1][k2] is not None:
-                        v = type(config[k1][k2])(unknown[idx+1])
-                    else:
-                        v = unknown[idx+1]
-                print(f'Changing {k1}:{k2} ---- {config[k1][k2]} to {v}')
-                config[k1][k2] = v
-            else:
-                k = arg.replace('--', '')
-                v = unknown[idx+1]
-                argtype = type(config[k])
-                print(f'Changing {k} ---- {config[k]} to {v}')
-                config[k] = v
-
-    return config
-
-
-def create_args_parser():
-    parser = argparse.ArgumentParser()
-    # standard configs
-    parser.add_argument('--config', type=str, default=None, help='Path to config file.')
-    parser.add_argument('--resume_dir', type=str, default=None, help='Directory of experiment to load.')
-    return parser
-
-
-def load_config(args, unknown, base_config_path=None):
+def load_config(args, base_config_path=None):
     ''' overwrite seq
     command line param --over--> args.config --over--> default config yaml
     '''
-    assert (args.config is not None) != (args.resume_dir is not None), "you must specify ONLY one in 'config' or 'resume_dir' "
+    assert args.config is None, "you must specify 'config'"
 
-    # NOTE: '--local_rank=xx' is automatically given by torch.distributed.launch (if used)
-    #       BUT: pytorch suggest to use os.environ['LOCAL_RANK'] instead, and --local_rank=xxx will be deprecated in the future.
-    #            so we are not using --local_rank at all.
-    found_k = None
-    for item in unknown:
-        if 'local_rank' in item:
-            found_k = item
-            break
-    if found_k is not None:
-        unknown.remove(found_k)
-
-    if args.resume_dir is not None:
-        assert args.config is None, "given --config will not be used when given --resume_dir"
-        assert '--expname' not in unknown, "given --expname with --resume_dir will lead to unexpected behavior."
-        #---------------
-        # if loading from a dir, do not use base.yaml as the default; 
-        #---------------
-        config_path = os.path.join(args.resume_dir, 'config.yaml')
-        config = load_yaml(config_path, default_path=None)
-
-        # use configs given by command line to further overwrite current config
-        config = update_config(config, unknown)
-
-        # use the loading directory as the experiment path
-        config.training.exp_dir = args.resume_dir
-        print("=> Loading previous experiments in: {}".format(config.training.exp_dir))
-    else:
-        #---------------
-        # if loading from a config file
-        # use base.yaml as default
-        #---------------
-        config = load_yaml(args.config, default_path=base_config_path)
-
-        # use configs given by command line to further overwrite current config
-        config = update_config(config, unknown)
+    config = load_yaml(args.config, default_path=base_config_path)
 
     # add other configs in args to config
     other_dict = vars(args)
     other_dict.pop('config')
-    other_dict.pop('resume_dir')
     config.update(other_dict)
 
     return config

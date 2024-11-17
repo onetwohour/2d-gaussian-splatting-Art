@@ -34,6 +34,7 @@ from criteria.constrative_loss import ContrastiveLoss
 from criteria.patchens_loss import PatchNCELoss
 from criteria.perp_loss import VGGPerceptualLoss
 from utils import io_util
+import concurrent.futures
 
 def create_fine_neg_texts(args):
     path = "criteria/neg_text.txt"
@@ -69,6 +70,26 @@ def create_fine_neg_texts(args):
             all_texts += results[key]
     return all_texts
 
+def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text):
+    dir_clip_loss = loss_dict["clip"](rgb_gt, s_text, rgb_pred, t_text)
+    return dir_clip_loss * args.finetune.w_clip
+
+def compute_perceptual_loss(args, loss_dict, rgb_gt, rgb_pred):
+    perp_loss = loss_dict["perceptual"](rgb_pred, rgb_gt)
+    return perp_loss * args.finetune.w_perceptual
+
+def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text):
+    s_text = random.choice(neg_texts)
+    contrastive_loss = loss_dict["contrastive"](rgb_gt, s_text, rgb_pred, t_text)
+    return contrastive_loss * args.finetune.w_contrastive
+
+def compute_patch_loss(args, loss_dict, rgb_pred, t_text, neg_texts):
+    neg_counts = 8
+    s_text_list = random.sample(neg_texts, neg_counts)
+    is_full_res = args.data.downscale == 1
+    patch_loss = loss_dict["patchnce"](s_text_list, rgb_pred, t_text, is_full_res)
+    return patch_loss * args.finetune.w_patchnce
+
 def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, H=480):
     """
     Calculate CLIP-driven style losses for Gaussian Splatting.
@@ -93,33 +114,22 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
     rgb_pred = rgb.view(-1, *rgb.shape[-3:])
     rgb_gt = rgb_gt.view(-1, *rgb_gt.shape[-3:])
 
-    rgb_pred = F.interpolate(rgb_pred, size=(H, H))
-    rgb_gt = F.interpolate(rgb_gt, size=(H, H))
+    rgb_pred = F.interpolate(rgb_pred, size=(H, H), mode='bicubic', align_corners=False)
+    rgb_gt = F.interpolate(rgb_gt, size=(H, H), mode='bicubic', align_corners=False)
     
-    # Direct CLIP loss with source and target texts
     s_text = args.finetune.src_text
     t_text = args.finetune.target_text
-    dir_clip_loss = loss_dict["clip"](rgb_gt, s_text, rgb_pred, t_text)
-    loss += dir_clip_loss * args.finetune.w_clip
-    # print("Directional CLIP loss:", dir_clip_loss.item() * args.finetune.w_clip)
-    
-    # Perceptual loss
-    perp_loss = loss_dict["perceptual"](rgb_pred, rgb_gt)
-    loss += perp_loss * args.finetune.w_perceptual
-    # print("Perceptual loss:", perp_loss.item() * args.finetune.w_perceptual)
-    
-    # Global Contrastive Loss
-    s_text = random.choice(neg_texts)
-    contrastive_loss = loss_dict["contrastive"](rgb_gt, s_text, rgb_pred, t_text)
-    loss += contrastive_loss * args.finetune.w_contrastive
-    
-    # Local Contrastive Loss with patch-based samples
-    neg_counts = 8
-    s_text_list = random.sample(neg_texts, neg_counts)
-    is_full_res = args.data.downscale == 1
-    patch_loss = loss_dict["patchnce"](s_text_list, rgb_pred, t_text, is_full_res)
-    loss += patch_loss * args.finetune.w_patchnce
 
+    with concurrent.futures.ThreadPoolExecutor() as executor:
+        future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text)
+        future_perceptual = executor.submit(compute_perceptual_loss, args, loss_dict, rgb_gt, rgb_pred)
+        future_contrastive = executor.submit(compute_contrastive_loss, args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text)
+        future_patch = executor.submit(compute_patch_loss, args, loss_dict, rgb_pred, t_text, neg_texts)
+        
+        loss = sum(f.result() for f in concurrent.futures.as_completed(
+            [future_dir_clip, future_perceptual, future_contrastive, future_patch]
+        ))
+        
     return loss
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, config):
@@ -377,7 +387,7 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    config = io_util.load_config(args, [])
+    config = io_util.load_config(args)
 
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
