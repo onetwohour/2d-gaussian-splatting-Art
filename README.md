@@ -55,7 +55,7 @@ pip install -r requirements.txt
 
 ```
 # if use CUDA 11.7
-pip install torch==2.0.0+cu117 torchaudio==2.0.0 torchvision==0.15.0 -f https://download.pytorc
+pip install torch==2.0.0+cu117 torchaudio==2.0.0 torchvision==0.15.0 -f https://download.pytorch.org/whl/torch_stable.html
 ```
 
 4. Train
