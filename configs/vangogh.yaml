@@ -2,6 +2,7 @@ expname: vangogh
 
 data:
   downscale: 2        # downscale image for training
+  reshape_size: 480   # Image Size for calculate style loss
 
 finetune:
   src_text: "photo"

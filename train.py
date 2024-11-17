@@ -144,7 +144,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_normal_for_log = 0.0
 
     contrastive_loss = ContrastiveLoss()
-    patchnce_loss = PatchNCELoss([480, 480]).cuda()
+    patchnce_loss = PatchNCELoss([config.data.reshape_size, config.data.reshape_size]).cuda()
     clip_loss = CLIPLoss()
     perp_loss = VGGPerceptualLoss().cuda()
     loss_dict = {'contrastive': contrastive_loss, 'patchnce': patchnce_loss,\
@@ -175,7 +175,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
 
-        style_loss = calc_style_loss(image, gt_image, config, loss_dict, neg_list, H=480)
+        style_loss = calc_style_loss(image, gt_image, config, loss_dict, neg_list, H=config.data.reshape_size)
         total_loss = loss + style_loss
         
         # regularization
