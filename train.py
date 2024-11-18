@@ -32,7 +32,6 @@ import random
 from criteria.clip_loss import CLIPLoss
 from criteria.constrative_loss import ContrastiveLoss
 from criteria.patchens_loss import PatchNCELoss
-from criteria.perp_loss import VGGPerceptualLoss
 from utils import io_util
 import concurrent.futures
 
@@ -122,14 +121,13 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text)
-        future_perceptual = executor.submit(compute_perceptual_loss, args, loss_dict, rgb_gt, rgb_pred)
-        future_contrastive = executor.submit(compute_contrastive_loss, args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text)
-        future_patch = executor.submit(compute_patch_loss, args, loss_dict, rgb_pred, t_text, neg_texts)
+        # future_contrastive = executor.submit(compute_contrastive_loss, args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text)
+        # future_patch = executor.submit(compute_patch_loss, args, loss_dict, rgb_pred, t_text, neg_texts)
         
-        loss = sum(f.result() for f in concurrent.futures.as_completed(
-            [future_dir_clip, future_perceptual, future_contrastive, future_patch]
-        ))
-        
+        concurrent.futures.wait([future_dir_clip], return_when=concurrent.futures.ALL_COMPLETED)
+
+        loss = future_dir_clip.result() * args.finetune.w_clip
+
     return loss
 
 def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, config):
@@ -156,9 +154,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     contrastive_loss = ContrastiveLoss()
     patchnce_loss = PatchNCELoss([config.data.reshape_size, config.data.reshape_size]).cuda()
     clip_loss = CLIPLoss()
-    perp_loss = VGGPerceptualLoss().cuda()
-    loss_dict = {'contrastive': contrastive_loss, 'patchnce': patchnce_loss,\
-        'clip': clip_loss, 'perceptual': perp_loss}
+    loss_dict = {'contrastive': contrastive_loss, 'patchnce': patchnce_loss, 'clip': clip_loss}
     neg_list = create_fine_neg_texts(config)
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
@@ -186,7 +182,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
 
         style_loss = calc_style_loss(image, gt_image, config, loss_dict, neg_list, H=config.data.reshape_size)
-        total_loss = loss + style_loss
         
         # regularization
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
@@ -200,7 +195,7 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         dist_loss = lambda_dist * (rend_dist).mean()
         
         # loss
-        total_loss += dist_loss + normal_loss
+        total_loss = loss + dist_loss + normal_loss + style_loss * config.finetune.w_style
         total_loss.backward()
 
         iter_end.record()
@@ -373,7 +368,7 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 14_000, 21_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
     parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
     parser.add_argument("--start_checkpoint", type=str, default = None)
