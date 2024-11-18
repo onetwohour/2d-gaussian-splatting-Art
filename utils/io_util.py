@@ -225,7 +225,7 @@ def load_config(args, base_config_path=None):
     ''' overwrite seq
     command line param --over--> args.config --over--> default config yaml
     '''
-    assert args.config is None, "you must specify 'config'"
+    assert args.config is not None, "you must specify 'config'"
 
     config = load_yaml(args.config, default_path=base_config_path)
 
