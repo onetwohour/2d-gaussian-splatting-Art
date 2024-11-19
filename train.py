@@ -11,7 +11,6 @@
 
 import os
 import torch
-from torch.nn import functional as F
 from random import randint
 from utils.loss_utils import l1_loss, ssim
 from gaussian_renderer import render, network_gui
@@ -28,109 +27,8 @@ try:
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
-import random 
-from criteria.clip_loss import CLIPLoss
-from criteria.constrative_loss import ContrastiveLoss
-from criteria.patchens_loss import PatchNCELoss
-from utils import io_util
-import concurrent.futures
 
-def create_fine_neg_texts(args):
-    path = "criteria/neg_text.txt"
-    results = {}
-    curr_key = 0
-    with open(path, 'r') as fr:
-        contents = fr.readlines()
-        for item in contents:
-            item = item.strip()
-            if item.startswith("#"):
-                curr_key = item[1:]
-                results[curr_key] = []
-            else:
-                results[curr_key].append(item.split(".")[1])
-        
-    all_texts = []
-    remove_ids = [] 
-    ttext = args.finetune.target_text.lower()
-    if 'botero' in ttext or 'monalisa' in ttext or 'portrait' in ttext or 'painting' in ttext:
-        remove_ids = ['portrait']
-    elif 'zombie' in ttext:
-        remove_ids = ['zombie']
-    elif 'wolf' in ttext:
-        remove_ids = ['wolf']
-    elif 'pixlar' in ttext or 'disney' in ttext:
-        remove_ids = ['disney']
-    elif 'sketch' in ttext:
-        remove_ids = ['sketch'] 
-
-    for key in results:
-        if key not in remove_ids:
-        #if key in remove_ids:
-            all_texts += results[key]
-    return all_texts
-
-def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text):
-    dir_clip_loss = loss_dict["clip"](rgb_gt, s_text, rgb_pred, t_text)
-    return dir_clip_loss * args.finetune.w_clip
-
-def compute_perceptual_loss(args, loss_dict, rgb_gt, rgb_pred):
-    perp_loss = loss_dict["perceptual"](rgb_pred, rgb_gt)
-    return perp_loss * args.finetune.w_perceptual
-
-def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text):
-    s_text = random.choice(neg_texts)
-    contrastive_loss = loss_dict["contrastive"](rgb_gt, s_text, rgb_pred, t_text)
-    return contrastive_loss * args.finetune.w_contrastive
-
-def compute_patch_loss(args, loss_dict, rgb_pred, t_text, neg_texts):
-    neg_counts = 8
-    s_text_list = random.sample(neg_texts, neg_counts)
-    is_full_res = args.data.downscale == 1
-    patch_loss = loss_dict["patchnce"](s_text_list, rgb_pred, t_text, is_full_res)
-    return patch_loss * args.finetune.w_patchnce
-
-def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, H=480):
-    """
-    Calculate CLIP-driven style losses for Gaussian Splatting.
-
-    Parameters
-    ----------
-    rgb: torch.Tensor
-        Rendered Gaussian splatted image.
-    rgb_gt: torch.Tensor
-        Ground truth target image.
-    args: Namespace
-        Argument configuration containing fine-tuning parameters.
-    loss_dict: dict
-        Dictionary containing different loss functions such as "clip", "perceptual", "contrastive", and "patchnce".
-    neg_texts: list
-        List of negative sample texts for contrastive loss.
-    H: int
-        Height of the image, used to reshape the input tensors.
-    """
-    loss = 0.0
-
-    rgb_pred = rgb.view(-1, *rgb.shape[-3:])
-    rgb_gt = rgb_gt.view(-1, *rgb_gt.shape[-3:])
-
-    rgb_pred = F.interpolate(rgb_pred, size=(H, H), mode='bicubic', align_corners=False)
-    rgb_gt = F.interpolate(rgb_gt, size=(H, H), mode='bicubic', align_corners=False)
-    
-    s_text = args.finetune.src_text
-    t_text = args.finetune.target_text
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text)
-        # future_contrastive = executor.submit(compute_contrastive_loss, args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text)
-        # future_patch = executor.submit(compute_patch_loss, args, loss_dict, rgb_pred, t_text, neg_texts)
-        
-        concurrent.futures.wait([future_dir_clip], return_when=concurrent.futures.ALL_COMPLETED)
-
-        loss = future_dir_clip.result() * args.finetune.w_clip
-
-    return loss
-
-def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, config):
+def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
@@ -150,12 +48,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
     ema_loss_for_log = 0.0
     ema_dist_for_log = 0.0
     ema_normal_for_log = 0.0
-
-    contrastive_loss = ContrastiveLoss()
-    patchnce_loss = PatchNCELoss([config.data.reshape_size, config.data.reshape_size]).cuda()
-    clip_loss = CLIPLoss()
-    loss_dict = {'contrastive': contrastive_loss, 'patchnce': patchnce_loss, 'clip': clip_loss}
-    neg_list = create_fine_neg_texts(config)
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -180,8 +72,6 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         gt_image = viewpoint_cam.original_image.cuda()
         Ll1 = l1_loss(image, gt_image)
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
-
-        style_loss = calc_style_loss(image, gt_image, config, loss_dict, neg_list, H=config.data.reshape_size)
         
         # regularization
         lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
@@ -193,9 +83,10 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
         normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
         normal_loss = lambda_normal * (normal_error).mean()
         dist_loss = lambda_dist * (rend_dist).mean()
-        
+
         # loss
-        total_loss = loss + dist_loss + normal_loss + style_loss * config.finetune.w_style
+        total_loss = loss + dist_loss + normal_loss
+        
         total_loss.backward()
 
         iter_end.record()
@@ -208,13 +99,13 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
 
 
             if iteration % 10 == 0:
-                losses = {
+                loss_dict = {
                     "Loss": f"{ema_loss_for_log:.{5}f}",
                     "distort": f"{ema_dist_for_log:.{5}f}",
                     "normal": f"{ema_normal_for_log:.{5}f}",
                     "Points": f"{len(gaussians.get_xyz)}"
                 }
-                progress_bar.set_postfix(losses)
+                progress_bar.set_postfix(loss_dict)
 
                 progress_bar.update(10)
             if iteration == opt.iterations:
@@ -275,6 +166,9 @@ def training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoi
                 except Exception as e:
                     # raise e
                     network_gui.conn = None
+                    
+    print("\n[ITER {}] Saving Checkpoint".format(opt.iterations))
+    torch.save((gaussians.capture(), opt.iterations), scene.model_path + "/chkpnt" + str(opt.iterations) + ".pth")
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -368,13 +262,11 @@ if __name__ == "__main__":
     parser.add_argument('--port', type=int, default=6009)
     parser.add_argument('--detect_anomaly', action='store_true', default=False)
     parser.add_argument("--test_iterations", nargs="+", type=int, default=[7_000, 30_000])
-    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 14_000, 21_000, 30_000])
+    parser.add_argument("--save_iterations", nargs="+", type=int, default=[7_000, 30_000])
     parser.add_argument("--quiet", action="store_true")
-    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[])
+    parser.add_argument("--checkpoint_iterations", nargs="+", type=int, default=[7_000, 14_000, 21_000, 30_000])
     parser.add_argument("--start_checkpoint", type=str, default = None)
-    parser.add_argument("--config", type=str, default = None)
     args = parser.parse_args(sys.argv[1:])
-    args.resume_dir = None
     args.save_iterations.append(args.iterations)
     
     print("Optimizing " + args.model_path)
@@ -382,12 +274,10 @@ if __name__ == "__main__":
     # Initialize system state (RNG)
     safe_state(args.quiet)
 
-    config = io_util.load_config(args)
-
     # Start GUI server, configure and run training
     network_gui.init(args.ip, args.port)
     torch.autograd.set_detect_anomaly(args.detect_anomaly)
-    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint, config)
+    training(lp.extract(args), op.extract(args), pp.extract(args), args.test_iterations, args.save_iterations, args.checkpoint_iterations, args.start_checkpoint)
 
     # All done
     print("\nTraining complete.")
