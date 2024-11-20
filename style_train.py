@@ -164,23 +164,34 @@ def style_training(dataset, opt, pipe, saving_iterations, checkpoint_iterations,
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
         
         gt_image = viewpoint_cam.original_image.cuda()
+        
+        lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
+        lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
+
+        rend_dist = render_pkg["rend_dist"]
+        rend_normal  = render_pkg['rend_normal']
+        surf_normal = render_pkg['surf_normal']
+        normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
+        normal_loss = lambda_normal * (normal_error).mean()
+        dist_loss = lambda_dist * (rend_dist).mean()
 
         style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, H=config.data.reshape_size)
-        
+
         # loss
-        style_loss.backward()
+        loss = normal_loss + dist_loss + style_loss
+        loss.backward()
 
         iter_end.record()
 
         with torch.no_grad():
             if iteration % 10 == 0:
-                loss = {
+                l_dict = {
                     "clip": f"{losses['clip']:.{5}f}",
                     "perceptual": f"{losses['perceptual']:.{5}f}",
                     "contrastive": f"{losses['contrastive']:.{5}f}",
                     "patchnce": f"{losses['patchnce']:.{5}f}"
                 }
-                progress_bar.set_postfix(loss)
+                progress_bar.set_postfix(l_dict)
 
                 progress_bar.update(10)
             if iteration == opt.iterations:
