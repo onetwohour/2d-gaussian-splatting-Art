@@ -1,4 +1,4 @@
-
+import concurrent.futures
 import torch
 import clip
 import torchvision.transforms as transforms
@@ -172,6 +172,16 @@ class PatchNCELoss(torch.nn.Module):
         loss_contrastive = torch.mean(- torch.log(pos / (pos + neg_texts_sum)))
 
         return loss_contrastive
+    
+    def process_image(self, i, j, th, tw, target_img, is_full_res, source_classes, target_class):
+        img = transforms.functional.crop(target_img, i, j, th, tw)
+        
+        if not is_full_res:
+            img = F.interpolate(img, size=(224, 224), mode='bicubic', align_corners=False)
+            
+        img = img.to(self.device)
+        loss = self.clip_contrastive_loss(source_classes, img, target_class)
+        return loss
 
     def forward(self, source_classes: list, target_img: torch.Tensor, target_class: str, is_full_res:bool):
 
@@ -194,28 +204,27 @@ class PatchNCELoss(torch.nn.Module):
             th, tw = 112, 112
         #th, tw = 128, 128
         total_loss = 0
-        for _ in range(12):
-        #for _ in range(18):
-            i = torch.randint(0, H - th + 1, size=(1,)).item()
-            if H != W: 
-                if not is_full_res:
-                    i = torch.randint(100, H - th + 1-100, size=(1,)).item()
-                else:
-                    i = torch.randint(200, H - th + 1-200, size=(1,)).item()
-            #!HARDCODED Aug 24: for girl dataset
-            else: #!HARDCODED Aug 25: for girl scene, which is 1:1
-                if not is_full_res:
-                    i = torch.randint(40, H - th + 1-40, size=(1,)).item()
-                else:
-                    i = torch.randint(80, H - th + 1-80, size=(1,)).item()
-            # i = torch.randint(0, H - th + 1, size=(1,)).item()#for llff dataset
-            j = torch.randint(0, W - tw + 1, size=(1,)).item()
-            img = transforms.functional.crop(target_img, i, j, th, tw)
-            if not is_full_res:
-                #2x upsample
-                img = F.interpolate(img, size=(224, 224), mode='bicubic', align_corners=False)
-
-            loss = self.clip_contrastive_loss(source_classes, img, target_class)
-            total_loss = total_loss + loss
+        with concurrent.futures.ThreadPoolExecutor() as executor:
+            futures = []
+            for _ in range(12):
+            #for _ in range(18):
+                i = torch.randint(0, H - th + 1, size=(1,)).item()
+                if H != W: 
+                    if not is_full_res:
+                        i = torch.randint(100, H - th + 1-100, size=(1,)).item()
+                    else:
+                        i = torch.randint(200, H - th + 1-200, size=(1,)).item()
+                #!HARDCODED Aug 24: for girl dataset
+                else: #!HARDCODED Aug 25: for girl scene, which is 1:1
+                    if not is_full_res:
+                        i = torch.randint(40, H - th + 1-40, size=(1,)).item()
+                    else:
+                        i = torch.randint(80, H - th + 1-80, size=(1,)).item()
+                # i = torch.randint(0, H - th + 1, size=(1,)).item()#for llff dataset
+                j = torch.randint(0, W - tw + 1, size=(1,)).item()
+                futures.append(executor.submit(self.process_image, i, j, th, tw, target_img, is_full_res, source_classes, target_class))
+            
+            for future in concurrent.futures.as_completed(futures):
+                total_loss += future.result()
 
         return total_loss
