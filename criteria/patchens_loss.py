@@ -91,7 +91,7 @@ imagenet_templates = [
 
 class PatchNCELoss(torch.nn.Module):
 
-    def __init__(self,target_hw:list):
+    def __init__(self,target_hw:list,num_patches=12):
         super(PatchNCELoss, self).__init__()
 
         self.device = "cuda"
@@ -103,6 +103,7 @@ class PatchNCELoss(torch.nn.Module):
                                              clip_preprocess.transforms[4:])  # + skip convert PIL to tensor
         self.cos = nn.CosineSimilarity()
         self.temperature = 0.07
+        self.num_patches = num_patches
 
 
         #self.ZeroPad = nn.ZeroPad2d(padding=(405, 405, 720, 720))
@@ -206,7 +207,7 @@ class PatchNCELoss(torch.nn.Module):
         total_loss = 0
         with concurrent.futures.ThreadPoolExecutor() as executor:
             futures = []
-            for _ in range(12):
+            for _ in range(self.num_patches):
             #for _ in range(18):
                 i = torch.randint(0, H - th + 1, size=(1,)).item()
                 if H != W: 

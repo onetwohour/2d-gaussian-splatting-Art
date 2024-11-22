@@ -149,7 +149,7 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
     ema_normal_for_log = 0.0
 
     contrastive_loss = ContrastiveLoss()
-    patchnce_loss = PatchNCELoss([config.data.reshape_size, config.data.reshape_size]).cuda()
+    patchnce_loss = PatchNCELoss([config.data.reshape_size, config.data.reshape_size], num_patches=4).cuda()
     clip_loss = CLIPLoss()
     perp_loss = VGGPerceptualLoss().cuda()
     loss_dict = {'contrastive': contrastive_loss, 'patchnce': patchnce_loss,\
