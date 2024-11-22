@@ -129,11 +129,11 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
 
 def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, config):
     first_iter = 0
+    tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     assert checkpoint, "Gaussian model must be exist."
-    tb_writer = prepare_output_and_logger(dataset)
     (model_params, _) = torch.load(checkpoint)
     gaussians.restore(model_params, opt)
 
