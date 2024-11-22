@@ -18,6 +18,7 @@ import concurrent.futures
 from argparse import ArgumentParser, Namespace
 from utils.general_utils import safe_state
 from utils.image_utils import psnr
+from utils.loss_utils import l1_loss, ssim
 from arguments import ModelParams, PipelineParams, OptimizationParams
 try:
     from torch.utils.tensorboard import SummaryWriter
@@ -63,9 +64,12 @@ def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text):
     dir_clip_loss = loss_dict["clip"](rgb_gt, s_text, rgb_pred, t_text)
     return dir_clip_loss * args.finetune.w_clip
 
-def compute_perceptual_loss(args, loss_dict, rgb_gt, rgb_pred):
-    perp_loss = loss_dict["perceptual"](rgb_pred, rgb_gt)
-    return perp_loss * args.finetune.w_perceptual
+def compute_perceptual_loss(args, rgb_gt, rgb_pred, opt):
+    # perp_loss = loss_dict["perceptual"](rgb_pred, rgb_gt)
+    # return perp_loss * args.finetune.w_perceptual
+    Ll1 = l1_loss(rgb_pred, rgb_gt)
+    loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(rgb_pred, rgb_gt))
+    return loss * args.finetune.w_perceptual
 
 def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text):
     s_text = random.choice(neg_texts)
@@ -79,7 +83,7 @@ def compute_patch_loss(args, loss_dict, rgb_pred, t_text, neg_texts):
     patch_loss = loss_dict["patchnce"](s_text_list, rgb_pred, t_text, is_full_res)
     return patch_loss * args.finetune.w_patchnce
 
-def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, H=480):
+def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, H, opt):
     """
     Calculate CLIP-driven style losses for Gaussian Splatting.
 
@@ -112,7 +116,7 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text)
-        future_perp = executor.submit(compute_perceptual_loss, args, loss_dict, rgb_gt, rgb_pred)
+        future_perp = executor.submit(compute_perceptual_loss, args, rgb_gt, rgb_pred, opt)
         future_contrastive = executor.submit(compute_contrastive_loss, args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text)
         future_patch = executor.submit(compute_patch_loss, args, loss_dict, rgb_pred, t_text, neg_texts)
         
@@ -181,7 +185,7 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         normal_loss = opt.lambda_normal * (normal_error).mean()
         dist_loss = opt.lambda_dist * (rend_dist).mean()
 
-        style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, H=config.data.reshape_size)
+        style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, config.data.reshape_size, opt)
 
         # loss
         loss = normal_loss + dist_loss + style_loss
@@ -215,7 +219,7 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
                 tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
                 tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
 
-            training_report(tb_writer, iteration, style_loss, loss, calc_style_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), config, loss_dict, neg_list)
+            training_report(tb_writer, iteration, style_loss, loss, calc_style_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), config, loss_dict, neg_list, opt)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -267,7 +271,7 @@ def prepare_output_and_logger(args):
     return tb_writer
 
 @torch.no_grad()
-def training_report(tb_writer, iteration, reg_loss, loss, fn_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, conf, loss_dict, neg_list):
+def training_report(tb_writer, iteration, reg_loss, loss, fn_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, conf, loss_dict, neg_list, opt):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/reg_loss', reg_loss.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
@@ -314,7 +318,7 @@ def training_report(tb_writer, iteration, reg_loss, loss, fn_loss, elapsed, test
                         if iteration == testing_iterations[0]:
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
 
-                    loss_test += fn_loss(image, gt_image, conf, loss_dict, neg_list, H=conf.data.reshape_size)[0].mean().double()
+                    loss_test += fn_loss(image, gt_image, conf, loss_dict, neg_list, conf.data.reshape_size, opt)[0].mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
 
                 psnr_test /= len(config['cameras'])
