@@ -26,6 +26,10 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
+def rgb_to_grayscale(rgb):
+    gray = 0.2989 * rgb[:, 0, :, :] + 0.5870 * rgb[:, 1, :, :] + 0.1140 * rgb[:, 2, :, :]
+    return gray.unsqueeze(1)
+
 def create_fine_neg_texts(args):
     path = "criteria/neg_text.txt"
     results = {}
@@ -67,8 +71,10 @@ def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text):
 def compute_perceptual_loss(args, rgb_gt, rgb_pred, opt):
     # perp_loss = loss_dict["perceptual"](rgb_pred, rgb_gt)
     # return perp_loss * args.finetune.w_perceptual
-    Ll1 = l1_loss(rgb_pred, rgb_gt)
-    loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(rgb_pred, rgb_gt))
+    pred = rgb_to_grayscale(rgb_pred)
+    gt = rgb_to_grayscale(rgb_gt)
+    Ll1 = l1_loss(pred, gt)
+    loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(pred, gt))
     return loss * args.finetune.w_perceptual
 
 def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text):
@@ -118,14 +124,14 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
         future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text)
         future_perp = executor.submit(compute_perceptual_loss, args, rgb_gt, rgb_pred, opt)
         future_contrastive = executor.submit(compute_contrastive_loss, args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text)
-        future_patch = executor.submit(compute_patch_loss, args, loss_dict, rgb_pred, t_text, neg_texts)
+        # future_patch = executor.submit(compute_patch_loss, args, loss_dict, rgb_pred, t_text, neg_texts)
         
-        concurrent.futures.wait([future_dir_clip, future_perp, future_contrastive, future_patch], return_when=concurrent.futures.ALL_COMPLETED)
+        concurrent.futures.wait([future_dir_clip, future_perp, future_contrastive], return_when=concurrent.futures.ALL_COMPLETED)
 
         losses["clip"] = future_dir_clip.result()
         losses["perceptual"] = future_perp.result()
         losses["contrastive"] = future_contrastive.result()
-        losses["patchnce"] = future_patch.result()
+        # losses["patchnce"] = future_patch.result()
     
     loss = sum(losses.values()) * args.finetune.w_style
 
