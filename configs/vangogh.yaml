@@ -6,9 +6,9 @@ data:
 
 finetune:
   src_text: "photo"
-  target_text: "painting, oil on canvas, Vincent van gogh style artwork"
-  w_contrastive: 0.05
-  w_patchnce: 0.01
+  target_text: "Vincent van gogh style artwork"
+  w_contrastive: 0.01
+  w_patchnce: 0.005
   w_perceptual: 1.1
-  w_clip: 0.3
+  w_clip: 0.05
   w_style: 1.0
