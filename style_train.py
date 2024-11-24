@@ -28,7 +28,8 @@ except ImportError:
 
 def rgb_to_grayscale(rgb):
     gray = 0.2989 * rgb[:, 0, :, :] + 0.5870 * rgb[:, 1, :, :] + 0.1140 * rgb[:, 2, :, :]
-    return gray.unsqueeze(1)
+    result = gray.repeat(3, 1, 1) * 0.5 + rgb * 0.5
+    return result
 
 def create_fine_neg_texts(args):
     path = "criteria/neg_text.txt"
@@ -64,9 +65,9 @@ def create_fine_neg_texts(args):
             all_texts += results[key]
     return all_texts
 
-def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text):
-    dir_clip_loss = loss_dict["clip"](rgb_gt, s_text, rgb_pred, t_text)
-    return dir_clip_loss * args.finetune.w_clip
+def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask):
+    dir_clip_loss = loss_dict["clip"](rgb_gt * mask, s_text, rgb_pred * mask, t_text)
+    return dir_clip_loss * args.finetune.w_clip * mask.mean()
 
 def compute_perceptual_loss(args, rgb_gt, rgb_pred, opt):
     # perp_loss = loss_dict["perceptual"](rgb_pred, rgb_gt)
@@ -77,19 +78,19 @@ def compute_perceptual_loss(args, rgb_gt, rgb_pred, opt):
     loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(pred, gt))
     return loss * args.finetune.w_perceptual
 
-def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text):
+def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text, mask):
     s_text = random.choice(neg_texts)
-    contrastive_loss = loss_dict["contrastive"](rgb_gt, s_text, rgb_pred, t_text)
-    return contrastive_loss * args.finetune.w_contrastive
+    contrastive_loss = loss_dict["contrastive"](rgb_gt * mask, s_text, rgb_pred * mask, t_text)
+    return contrastive_loss * args.finetune.w_contrastive  * mask.mean()
 
-def compute_patch_loss(args, loss_dict, rgb_pred, t_text, neg_texts):
+def compute_patch_loss(args, loss_dict, rgb_pred, t_text, neg_texts, mask):
     neg_counts = 8
     s_text_list = random.sample(neg_texts, neg_counts)
     is_full_res = args.data.downscale == 1
-    patch_loss = loss_dict["patchnce"](s_text_list, rgb_pred, t_text, is_full_res)
-    return patch_loss * args.finetune.w_patchnce
+    patch_loss = loss_dict["patchnce"](s_text_list, rgb_pred * mask, t_text, is_full_res)
+    return patch_loss * args.finetune.w_patchnce * mask.mean()
 
-def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, H, opt):
+def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, H, opt, background):
     """
     Calculate CLIP-driven style losses for Gaussian Splatting.
 
@@ -113,17 +114,17 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
 
     rgb_pred = rgb.view(-1, *rgb.shape[-3:])
     rgb_gt = rgb_gt.view(-1, *rgb_gt.shape[-3:])
-
-    rgb_pred = F.interpolate(rgb_pred, size=(H, H), mode='bicubic', align_corners=False)
-    rgb_gt = F.interpolate(rgb_gt, size=(H, H), mode='bicubic', align_corners=False)
     
     s_text = args.finetune.src_text
     t_text = args.finetune.target_text
 
+    background = background.view(1, 3, 1, 1)
+    mask = (rgb_gt != background).any(dim=1, keepdim=True).repeat(1, 3, 1, 1)
+
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text)
+        future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask)
         future_perp = executor.submit(compute_perceptual_loss, args, rgb_gt, rgb_pred, opt)
-        future_contrastive = executor.submit(compute_contrastive_loss, args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text)
+        future_contrastive = executor.submit(compute_contrastive_loss, args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text, mask)
         # future_patch = executor.submit(compute_patch_loss, args, loss_dict, rgb_pred, t_text, neg_texts)
         
         concurrent.futures.wait([future_dir_clip, future_perp, future_contrastive], return_when=concurrent.futures.ALL_COMPLETED)
@@ -191,7 +192,7 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         normal_loss = opt.lambda_normal * (normal_error).mean()
         dist_loss = opt.lambda_dist * (rend_dist).mean()
 
-        style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, config.data.reshape_size, opt)
+        style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, config.data.reshape_size, opt, background)
 
         # loss
         loss = normal_loss + dist_loss + style_loss
@@ -324,7 +325,7 @@ def training_report(tb_writer, iteration, reg_loss, loss, fn_loss, elapsed, test
                         if iteration == testing_iterations[0]:
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
 
-                    loss_test += fn_loss(image, gt_image, conf, loss_dict, neg_list, conf.data.reshape_size, opt)[0].mean().double()
+                    loss_test += fn_loss(image, gt_image, conf, loss_dict, neg_list, conf.data.reshape_size, opt, renderArgs[1])[0].mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
 
                 psnr_test /= len(config['cameras'])
