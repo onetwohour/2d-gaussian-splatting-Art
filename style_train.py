@@ -47,22 +47,24 @@ def create_fine_neg_texts(args):
         
     all_texts = []
     remove_ids = [] 
-    ttext = args.finetune.target_text.lower()
-    if 'botero' in ttext or 'monalisa' in ttext or 'portrait' in ttext or 'painting' in ttext:
-        remove_ids = ['portrait']
-    elif 'zombie' in ttext:
-        remove_ids = ['zombie']
-    elif 'wolf' in ttext:
-        remove_ids = ['wolf']
-    elif 'pixlar' in ttext or 'disney' in ttext:
-        remove_ids = ['disney']
-    elif 'sketch' in ttext:
-        remove_ids = ['sketch'] 
+    # ttext = args.finetune.target_text.lower()
+    # if 'botero' in ttext or 'monalisa' in ttext or 'portrait' in ttext or 'painting' in ttext:
+    #     remove_ids = ['portrait']
+    # elif 'zombie' in ttext:
+    #     remove_ids = ['zombie']
+    # elif 'wolf' in ttext:
+    #     remove_ids = ['wolf']
+    # elif 'pixlar' in ttext or 'disney' in ttext:
+    #     remove_ids = ['disney']
+    # elif 'sketch' in ttext:
+    #     remove_ids = ['sketch'] 
 
-    for key in results:
-        if key not in remove_ids:
-        #if key in remove_ids:
-            all_texts += results[key]
+    # for key in results:
+    #     if key not in remove_ids:
+    #     #if key in remove_ids:
+    #         all_texts += results[key]
+
+    all_texts = results["base"]
     return all_texts
 
 def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask):

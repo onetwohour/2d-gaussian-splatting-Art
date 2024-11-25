@@ -5,10 +5,10 @@ data:
   reshape_size: 480   # Image Size for calculate style loss
 
 finetune:
-  src_text: "photo"
-  target_text: "Artwork in the style of Vincent van Gogh"
-  w_contrastive: 0.01
-  w_patchnce: 0.005
+  src_text: "real world"
+  target_text: "artwork in the style of Studio Ghibli, featuring soft pastel colors"
+  w_contrastive: 0.005
+  w_patchnce: 0.001
   w_perceptual: 1.1
-  w_clip: 0.1
+  w_clip: 0.07
   w_style: 1.0

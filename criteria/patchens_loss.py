@@ -88,6 +88,35 @@ imagenet_templates = [
     'a tattoo of the {}.',
 ]
 
+imagenet_templates_small = [
+    'a photo of a {}.',
+    'a rendering of a {}.',
+    'a cropped photo of the {}.',
+    'the photo of a {}.',
+    'a photo of a clean {}.',
+    'a photo of a dirty {}.',
+    'a dark photo of the {}.',
+    'a photo of my {}.',
+    'a photo of the cool {}.',
+    'a close-up photo of a {}.',
+    'a bright photo of the {}.',
+    'a cropped photo of a {}.',
+    'a photo of the {}.',
+    'a good photo of the {}.',
+    'a photo of one {}.',
+    'a close-up photo of the {}.',
+    'a rendition of the {}.',
+    'a photo of the clean {}.',
+    'a rendition of a {}.',
+    'a photo of a nice {}.',
+    'a good photo of a {}.',
+    'a photo of the nice {}.',
+    'a photo of the small {}.',
+    'a photo of the weird {}.',
+    'a photo of the large {}.',
+    'a photo of a cool {}.',
+    'a photo of a small {}.',
+]
 
 class PatchNCELoss(torch.nn.Module):
 
@@ -140,7 +169,7 @@ class PatchNCELoss(torch.nn.Module):
     def compose_text_with_templates(self, text: str, templates=imagenet_templates) -> list:
         return [template.format(text) for template in templates]
 
-    def get_text_features(self, class_str: str, templates=imagenet_templates, norm: bool = True) -> torch.Tensor:
+    def get_text_features(self, class_str: str, templates=imagenet_templates_small, norm: bool = True) -> torch.Tensor:
         template_text = self.compose_text_with_templates(class_str, templates)
 
         tokens = clip.tokenize(template_text).to(self.device)

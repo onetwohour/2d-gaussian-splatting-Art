@@ -219,7 +219,7 @@ class CLIPLoss(torch.nn.Module):
     def compose_text_with_templates(self, text: str, templates=imagenet_templates) -> list:
         return [template.format(text) for template in templates]
 
-    def get_text_features(self, class_str: str, templates=imagenet_templates, norm: bool = True) -> torch.Tensor:
+    def get_text_features(self, class_str: str, templates=imagenet_templates_small, norm: bool = True) -> torch.Tensor:
         template_text = self.compose_text_with_templates(class_str, templates)
 
         tokens = clip.tokenize(template_text).to(self.device)
