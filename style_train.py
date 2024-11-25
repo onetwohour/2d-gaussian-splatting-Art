@@ -67,7 +67,7 @@ def create_fine_neg_texts(args):
 
 def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask):
     dir_clip_loss = loss_dict["clip"](rgb_gt * mask, s_text, rgb_pred * mask, t_text)
-    return dir_clip_loss * args.finetune.w_clip * mask.mean()
+    return dir_clip_loss * args.finetune.w_clip * mask.float().mean()
 
 def compute_perceptual_loss(args, rgb_gt, rgb_pred, opt):
     # perp_loss = loss_dict["perceptual"](rgb_pred, rgb_gt)
@@ -81,14 +81,14 @@ def compute_perceptual_loss(args, rgb_gt, rgb_pred, opt):
 def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text, mask):
     s_text = random.choice(neg_texts)
     contrastive_loss = loss_dict["contrastive"](rgb_gt * mask, s_text, rgb_pred * mask, t_text)
-    return contrastive_loss * args.finetune.w_contrastive  * mask.mean()
+    return contrastive_loss * args.finetune.w_contrastive * mask.float().mean()
 
 def compute_patch_loss(args, loss_dict, rgb_pred, t_text, neg_texts, mask):
     neg_counts = 8
     s_text_list = random.sample(neg_texts, neg_counts)
     is_full_res = args.data.downscale == 1
     patch_loss = loss_dict["patchnce"](s_text_list, rgb_pred * mask, t_text, is_full_res)
-    return patch_loss * args.finetune.w_patchnce * mask.mean()
+    return patch_loss * args.finetune.w_patchnce * mask.float().mean()
 
 def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, H, opt, background):
     """
