@@ -90,7 +90,7 @@ def compute_patch_loss(args, loss_dict, rgb_pred, t_text, neg_texts, mask):
     patch_loss = loss_dict["patchnce"](s_text_list, rgb_pred * mask, t_text, is_full_res)
     return patch_loss * args.finetune.w_patchnce * mask.float().mean()
 
-def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, H, opt, background):
+def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, opt, background):
     """
     Calculate CLIP-driven style losses for Gaussian Splatting.
 
@@ -192,7 +192,7 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         normal_loss = opt.lambda_normal * (normal_error).mean()
         dist_loss = opt.lambda_dist * (rend_dist).mean()
 
-        style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, config.data.reshape_size, opt, background)
+        style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, opt, background)
 
         # loss
         loss = normal_loss + dist_loss + style_loss
@@ -325,7 +325,7 @@ def training_report(tb_writer, iteration, reg_loss, loss, fn_loss, elapsed, test
                         if iteration == testing_iterations[0]:
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
 
-                    loss_test += fn_loss(image, gt_image, conf, loss_dict, neg_list, conf.data.reshape_size, opt, renderArgs[1])[0].mean().double()
+                    loss_test += fn_loss(image, gt_image, conf, loss_dict, neg_list, opt, renderArgs[1])[0].mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
 
                 psnr_test /= len(config['cameras'])
