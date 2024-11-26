@@ -155,7 +155,7 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
     viewpoint_stack = None
     ema_loss_for_log = 0.0
 
-    contrastive_loss = ContrastiveLoss()
+    contrastive_loss = ContrastiveLoss(distance_type="cosine")
     patchnce_loss = PatchNCELoss([config.data.reshape_size, config.data.reshape_size], num_patches=4).cuda()
     clip_loss = CLIPLoss()
     perp_loss = VGGPerceptualLoss().cuda()
