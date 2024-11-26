@@ -143,7 +143,7 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
 def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, config):
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree)
+    gaussians = GaussianModel(dataset.sh_degree, style_train=True)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
     assert checkpoint, "Gaussian model must be exist."
@@ -158,8 +158,6 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
 
     viewpoint_stack = None
     ema_loss_for_log = 0.0
-    ema_dist_for_log = 0.0
-    ema_normal_for_log = 0.0
 
     contrastive_loss = ContrastiveLoss()
     patchnce_loss = PatchNCELoss([config.data.reshape_size, config.data.reshape_size], num_patches=4).cuda()
@@ -183,29 +181,18 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         viewpoint_cam = viewpoint_stack.pop(randint(0, len(viewpoint_stack)-1))
         
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+        image = render_pkg["render"]
         
         gt_image = viewpoint_cam.original_image.cuda()
 
-        rend_dist = render_pkg["rend_dist"]
-        rend_normal  = render_pkg['rend_normal']
-        surf_normal = render_pkg['surf_normal']
-        normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
-        normal_loss = opt.lambda_normal * (normal_error).mean()
-        dist_loss = opt.lambda_dist * (rend_dist).mean()
+        loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, opt, background)
 
-        style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, opt, background)
-
-        # loss
-        loss = normal_loss + dist_loss + style_loss
         loss.backward()
 
         iter_end.record()
 
         with torch.no_grad():
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
-            ema_dist_for_log = 0.4 * dist_loss.item() + 0.6 * ema_dist_for_log
-            ema_normal_for_log = 0.4 * normal_loss.item() + 0.6 * ema_normal_for_log
 
             if iteration % 10 == 0:
                 l_dict = {
@@ -224,26 +211,10 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
 
-            if tb_writer is not None:
-                tb_writer.add_scalar('train_loss_patches/dist_loss', ema_dist_for_log, iteration)
-                tb_writer.add_scalar('train_loss_patches/normal_loss', ema_normal_for_log, iteration)
-
-            training_report(tb_writer, iteration, style_loss, loss, calc_style_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), config, loss_dict, neg_list, opt)
+            training_report(tb_writer, iteration, loss, calc_style_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), config, loss_dict, neg_list, opt)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
-
-            # Densification
-            if iteration < opt.densify_until_iter:
-                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
-                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
-
-                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
-                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
-                    gaussians.densify_and_prune(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, size_threshold)
-                
-                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
-                    gaussians.reset_opacity()
 
             # Optimizer step
             if iteration < opt.iterations:
@@ -253,9 +224,6 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
             if (iteration in checkpoint_iterations):
                 print("\n[ITER {}] Saving Checkpoint".format(iteration))
                 torch.save((gaussians.capture(), iteration), scene.model_path + "/chkpnt" + str(iteration) + ".pth")
-
-    print("\n[ITER {}] Saving Checkpoint".format(opt.iterations))
-    torch.save((gaussians.capture(), opt.iterations), scene.model_path + "/chkpnt" + str(opt.iterations) + ".pth")
 
 def prepare_output_and_logger(args):    
     if not args.model_path:
@@ -280,9 +248,8 @@ def prepare_output_and_logger(args):
     return tb_writer
 
 @torch.no_grad()
-def training_report(tb_writer, iteration, reg_loss, loss, fn_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, conf, loss_dict, neg_list, opt):
+def training_report(tb_writer, iteration, loss, fn_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, conf, loss_dict, neg_list, opt):
     if tb_writer:
-        tb_writer.add_scalar('train_loss_patches/reg_loss', reg_loss.item(), iteration)
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
         tb_writer.add_scalar('iter_time', elapsed, iteration)
         tb_writer.add_scalar('total_points', scene.gaussians.get_xyz.shape[0], iteration)
