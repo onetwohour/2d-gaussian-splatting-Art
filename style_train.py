@@ -207,10 +207,6 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            if (iteration in saving_iterations):
-                print("\n[ITER {}] Saving Gaussians".format(iteration))
-                scene.save(iteration)
-
             training_report(tb_writer, iteration, loss, calc_style_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), config, loss_dict, neg_list, opt)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
