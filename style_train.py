@@ -72,12 +72,8 @@ def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mas
     return dir_clip_loss * args.finetune.w_clip * mask.float().mean()
 
 def compute_perceptual_loss(args, rgb_gt, rgb_pred, opt):
-    # perp_loss = loss_dict["perceptual"](rgb_pred, rgb_gt)
-    # return perp_loss * args.finetune.w_perceptual
-    pred = rgb_to_grayscale(rgb_pred)
-    gt = rgb_to_grayscale(rgb_gt)
-    Ll1 = l1_loss(pred, gt)
-    loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(pred, gt))
+    Ll1 = l1_loss(rgb_pred, rgb_gt)
+    loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(rgb_pred, rgb_gt))
     return loss * args.finetune.w_perceptual
 
 def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text, mask):
@@ -185,8 +181,16 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         
         gt_image = viewpoint_cam.original_image.cuda()
 
-        loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, opt, background)
+        rend_dist = render_pkg["rend_dist"]
+        rend_normal  = render_pkg['rend_normal']
+        surf_normal = render_pkg['surf_normal']
+        normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
+        normal_loss = opt.lambda_normal * (normal_error).mean()
+        dist_loss = opt.lambda_dist * (rend_dist).mean()
 
+        style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, opt, background)
+
+        loss = style_loss + normal_loss + dist_loss
         loss.backward()
 
         iter_end.record()
