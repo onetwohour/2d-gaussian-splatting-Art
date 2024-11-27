@@ -5,10 +5,10 @@ data:
   reshape_size: 480   # Image Size for calculate style loss
 
 finetune:
-  src_text: "real world"
-  target_text: "drawing in the style of Studio Ghibli, featuring soft pastel colors"
-  w_contrastive: 0.2
-  w_patchnce: 0.1
+  src_text: "a realistic photograph with sharp details, vibrant colors, and natural lighting"
+  target_text: "a magical fairytale style with soft pastel colors, warm lighting, and a hand-drawn cel animation feel, inspired by Studio Ghibli"
+  w_contrastive: 0.05
+  w_patchnce: 0.01
   w_perceptual: 1.1
-  w_clip: 1.0
+  w_clip: 0.3
   w_style: 1.0
