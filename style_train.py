@@ -152,6 +152,7 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
     iter_end = torch.cuda.Event(enable_timing = True)
 
     viewpoint_stack = None
+    ema_loss_for_log = 0.0
 
     contrastive_loss = ContrastiveLoss(distance_type="cosine")
     patchnce_loss = PatchNCELoss([config.data.reshape_size, config.data.reshape_size], num_patches=4).cuda()
@@ -194,6 +195,8 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         iter_end.record()
 
         with torch.no_grad():
+            ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+
             if iteration % 10 == 0:
                 l_dict = {
                     "clip": f"{losses['clip']:.{5}f}",
