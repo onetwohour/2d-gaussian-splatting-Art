@@ -25,11 +25,6 @@ try:
 except ImportError:
     TENSORBOARD_FOUND = False
 
-def rgb_to_grayscale(rgb):
-    gray = 0.2989 * rgb[:, 0, :, :] + 0.5870 * rgb[:, 1, :, :] + 0.1140 * rgb[:, 2, :, :]
-    result = gray.repeat(3, 1, 1) * 0.5 + rgb * 0.5
-    return result
-
 def create_fine_neg_texts(args):
     path = "criteria/neg_text.txt"
     results = {}
@@ -45,7 +40,7 @@ def create_fine_neg_texts(args):
                 results[curr_key].append(item.split(".")[1])
         
     all_texts = []
-    remove_ids = [] 
+    # remove_ids = [] 
     # ttext = args.finetune.target_text.lower()
     # if 'botero' in ttext or 'monalisa' in ttext or 'portrait' in ttext or 'painting' in ttext:
     #     remove_ids = ['portrait']
@@ -71,8 +66,7 @@ def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mas
     return dir_clip_loss * args.finetune.w_clip * mask.float().mean()
 
 def compute_perceptual_loss(args, rgb_gt, rgb_pred, opt):
-    Ll1 = l1_loss(rgb_pred, rgb_gt)
-    loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(rgb_pred, rgb_gt))
+    loss = opt.lambda_dssim * (1.0 - ssim(rgb_pred, rgb_gt))
     return loss * args.finetune.w_perceptual
 
 def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text, mask):
@@ -80,34 +74,12 @@ def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_tex
     contrastive_loss = loss_dict["contrastive"](rgb_gt * mask, s_text, rgb_pred * mask, t_text)
     return contrastive_loss * args.finetune.w_contrastive * mask.float().mean()
 
-def compute_patch_loss(args, loss_dict, rgb_pred, t_text, neg_texts, mask):
-    neg_counts = 8
-    s_text_list = random.sample(neg_texts, neg_counts)
-    is_full_res = args.data.downscale == 1
-    patch_loss = loss_dict["patchnce"](s_text_list, rgb_pred * mask, t_text, is_full_res)
-    return patch_loss * args.finetune.w_patchnce * mask.float().mean()
-
 def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, opt, background):
     """
     Calculate CLIP-driven style losses for Gaussian Splatting.
-
-    Parameters
-    ----------
-    rgb: torch.Tensor
-        Rendered Gaussian splatted image.
-    rgb_gt: torch.Tensor
-        Ground truth target image.
-    args: Namespace
-        Argument configuration containing fine-tuning parameters.
-    loss_dict: dict
-        Dictionary containing different loss functions such as "clip", "perceptual", "contrastive", and "patchnce".
-    neg_texts: list
-        List of negative sample texts for contrastive loss.
-    H: int
-        Height of the image, used to reshape the input tensors.
     """
     loss = 0.0
-    losses = {"clip": 0.0, "perceptual": 0.0, "contrastive": 0.0, "patchnce": 0.0}
+    losses = {"clip": 0.0, "perceptual": 0.0, "contrastive": 0.0}
 
     rgb_pred = rgb.view(-1, *rgb.shape[-3:])
     rgb_gt = rgb_gt.view(-1, *rgb_gt.shape[-3:])
@@ -122,14 +94,12 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
         future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask)
         future_perp = executor.submit(compute_perceptual_loss, args, rgb_gt, rgb_pred, opt)
         future_contrastive = executor.submit(compute_contrastive_loss, args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text, mask)
-        # future_patch = executor.submit(compute_patch_loss, args, loss_dict, rgb_pred, t_text, neg_texts)
         
         concurrent.futures.wait([future_dir_clip, future_perp, future_contrastive], return_when=concurrent.futures.ALL_COMPLETED)
 
         losses["clip"] = future_dir_clip.result()
         losses["perceptual"] = future_perp.result()
         losses["contrastive"] = future_contrastive.result()
-        # losses["patchnce"] = future_patch.result()
     
     loss = sum(losses.values()) * args.finetune.w_style
 
@@ -155,11 +125,8 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
     ema_loss_for_log = 0.0
 
     contrastive_loss = ContrastiveLoss(distance_type="cosine")
-    patchnce_loss = PatchNCELoss([config.data.reshape_size, config.data.reshape_size], num_patches=4).cuda()
     clip_loss = CLIPLoss()
-    perp_loss = VGGPerceptualLoss().cuda()
-    loss_dict = {'contrastive': contrastive_loss, 'patchnce': patchnce_loss,\
-                 'clip': clip_loss, 'perceptual': perp_loss}
+    loss_dict = {'contrastive': contrastive_loss, 'clip': clip_loss}
     neg_list = create_fine_neg_texts(config)
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
@@ -201,8 +168,7 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
                 l_dict = {
                     "clip": f"{losses['clip']:.{5}f}",
                     "perceptual": f"{losses['perceptual']:.{5}f}",
-                    "contrastive": f"{losses['contrastive']:.{5}f}",
-                    "patchnce": f"{losses['patchnce']:.{5}f}"
+                    "contrastive": f"{losses['contrastive']:.{5}f}"
                 }
                 progress_bar.set_postfix(l_dict)
 
