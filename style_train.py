@@ -3,6 +3,7 @@ import os
 import sys
 import uuid
 import torch
+import torch.nn.functional as F
 from scene import Scene, GaussianModel
 import random 
 from random import randint
@@ -10,8 +11,6 @@ from tqdm import tqdm
 from gaussian_renderer import render, network_gui
 from criteria.clip_loss import CLIPLoss
 from criteria.constrative_loss import ContrastiveLoss
-from criteria.patchens_loss import PatchNCELoss
-from criteria.perp_loss import VGGPerceptualLoss
 from utils import io_util
 import concurrent.futures
 from argparse import ArgumentParser, Namespace
@@ -63,7 +62,8 @@ def create_fine_neg_texts(args):
 
 def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask):
     dir_clip_loss = loss_dict["clip"](rgb_gt * mask, s_text, rgb_pred * mask, t_text)
-    return dir_clip_loss * args.finetune.w_clip * mask.float().mean()
+    Ll1 = l1_loss(rgb_pred, rgb_gt)
+    return (dir_clip_loss * 0.8 + Ll1 * 0.2) * args.finetune.w_clip * mask.float().mean()
 
 def compute_perceptual_loss(args, rgb_gt, rgb_pred, opt):
     loss = opt.lambda_dssim * (1.0 - ssim(rgb_pred, rgb_gt))
@@ -74,12 +74,22 @@ def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_tex
     contrastive_loss = loss_dict["contrastive"](rgb_gt * mask, s_text, rgb_pred * mask, t_text)
     return contrastive_loss * args.finetune.w_contrastive * mask.float().mean()
 
+def compute_smooth_loss(rgb_pred, mask, kernel_size=5):
+    kernel = torch.ones((1, 1, kernel_size, kernel_size), device=rgb_pred.device)
+    kernel[..., kernel_size // 2, kernel_size // 2] = -(kernel_size ** 2 - 1)
+
+    kernel = kernel.expand(rgb_pred.size(1), -1, -1, -1)
+    diff = F.conv2d(rgb_pred * mask, kernel, padding=kernel_size // 2, groups=rgb_pred.size(1))
+
+    loss = torch.mean(torch.abs(diff)) * mask.float().mean()
+    return loss
+
 def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, opt, background):
     """
     Calculate CLIP-driven style losses for Gaussian Splatting.
     """
     loss = 0.0
-    losses = {"clip": 0.0, "perceptual": 0.0, "contrastive": 0.0}
+    losses = {"clip": 0.0, "perceptual": 0.0, "contrastive": 0.0, "smooth": 0.0}
 
     rgb_pred = rgb.view(-1, *rgb.shape[-3:])
     rgb_gt = rgb_gt.view(-1, *rgb_gt.shape[-3:])
@@ -94,12 +104,14 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
         future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask)
         future_perp = executor.submit(compute_perceptual_loss, args, rgb_gt, rgb_pred, opt)
         future_contrastive = executor.submit(compute_contrastive_loss, args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text, mask)
+        future_smooth = executor.submit(compute_smooth_loss, rgb_pred, mask)
         
-        concurrent.futures.wait([future_dir_clip, future_perp, future_contrastive], return_when=concurrent.futures.ALL_COMPLETED)
+        concurrent.futures.wait([future_dir_clip, future_perp, future_contrastive, future_smooth], return_when=concurrent.futures.ALL_COMPLETED)
 
         losses["clip"] = future_dir_clip.result()
         losses["perceptual"] = future_perp.result()
         losses["contrastive"] = future_contrastive.result()
+        losses["smooth"] = future_smooth.result()
     
     loss = sum(losses.values()) * args.finetune.w_style
 
@@ -168,7 +180,8 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
                 l_dict = {
                     "clip": f"{losses['clip']:.{5}f}",
                     "perceptual": f"{losses['perceptual']:.{5}f}",
-                    "contrastive": f"{losses['contrastive']:.{5}f}"
+                    "contrastive": f"{losses['contrastive']:.{5}f}",
+                    "smooth": f"{losses['smooth']:.{5}f}"
                 }
                 progress_bar.set_postfix(l_dict)
 
