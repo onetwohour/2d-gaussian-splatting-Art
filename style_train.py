@@ -86,8 +86,11 @@ def compute_smoothness_loss(args, rgb_pred, mask):
     return laplacian_loss * args.finetune.w_smooth * mask.float().mean()
 
 def compute_sharpness_loss(args, rgb_pred, rgb_gt, mask):
-    rgb_pred = rgb_pred * mask
-    rgb_gt = rgb_gt * mask
+    def rgb_to_grayscale(image):
+        return 0.2989 * image[:, 0, :, :] + 0.5870 * image[:, 1, :, :] + 0.1140 * image[:, 2, :, :]
+
+    rgb_pred = rgb_to_grayscale(rgb_pred * mask).unsqueeze(1)
+    rgb_gt = rgb_to_grayscale(rgb_gt * mask).unsqueeze(1)
 
     sobel_x = torch.tensor([[[[-1, 0, 1], 
                               [-2, 0, 2], 
