@@ -74,22 +74,48 @@ def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_tex
     contrastive_loss = loss_dict["contrastive"](rgb_gt * mask, s_text, rgb_pred * mask, t_text)
     return contrastive_loss * args.finetune.w_contrastive * mask.float().mean()
 
-def compute_smooth_loss(rgb_pred, mask, kernel_size=5):
-    kernel = torch.ones((1, 1, kernel_size, kernel_size), device=rgb_pred.device)
-    kernel[..., kernel_size // 2, kernel_size // 2] = -(kernel_size ** 2 - 1)
+def compute_smoothness_loss(args, rgb_pred, mask):
+    rgb_pred = rgb_pred * mask
+    laplacian_kernel = torch.tensor([[[[0, 1, 0], 
+                                        [1, -4, 1], 
+                                        [0, 1, 0]]]], dtype=torch.float32, device=rgb_pred.device)
+    laplacian_kernel = laplacian_kernel.repeat(*rgb_pred.shape[:2], 1, 1)
+    laplacian_output = F.conv2d(rgb_pred, laplacian_kernel, padding=1, groups=1)
+    
+    laplacian_loss = torch.abs(laplacian_output).mean()
+    return laplacian_loss * args.finetune.w_smooth * mask.float().mean()
 
-    kernel = kernel.expand(rgb_pred.size(1), -1, -1, -1)
-    diff = F.conv2d(rgb_pred * mask, kernel, padding=kernel_size // 2, groups=rgb_pred.size(1))
+def compute_sharpness_loss(args, rgb_pred, rgb_gt, mask):
+    rgb_pred = rgb_pred * mask
+    rgb_gt = rgb_gt * mask
 
-    loss = torch.mean(torch.abs(diff)) * mask.float().mean()
-    return loss
+    sobel_x = torch.tensor([[[[-1, 0, 1], 
+                              [-2, 0, 2], 
+                              [-1, 0, 1]]]], dtype=torch.float32, device=rgb_pred.device)
+    sobel_y = torch.tensor([[[[-1, -2, -1], 
+                              [ 0,  0,  0], 
+                              [ 1,  2,  1]]]], dtype=torch.float32, device=rgb_pred.device)
+
+    sobel_x = sobel_x.repeat(*rgb_pred.shape[:2], 1, 1)
+    sobel_y = sobel_y.repeat(*rgb_pred.shape[:2], 1, 1)
+
+    grad_pred_x = F.conv2d(rgb_pred, sobel_x, padding=1, groups=1)
+    grad_pred_y = F.conv2d(rgb_pred, sobel_y, padding=1, groups=1)
+    grad_gt_x = F.conv2d(rgb_gt, sobel_x, padding=1, groups=1)
+    grad_gt_y = F.conv2d(rgb_gt, sobel_y, padding=1, groups=1)
+    
+    grad_diff_x = torch.abs(grad_pred_x - grad_gt_x)
+    grad_diff_y = torch.abs(grad_pred_y - grad_gt_y)
+    
+    sharpness_loss = (grad_diff_x + grad_diff_y).mean()
+    return sharpness_loss * args.finetune.w_sharp * mask.float().mean()
 
 def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, opt, background):
     """
     Calculate CLIP-driven style losses for Gaussian Splatting.
     """
     loss = 0.0
-    losses = {"clip": 0.0, "perceptual": 0.0, "contrastive": 0.0, "smooth": 0.0}
+    losses = {"clip": 0.0, "perceptual": 0.0, "contrastive": 0.0, "smooth": 0.0, "sharp": 0.0}
 
     rgb_pred = rgb.view(-1, *rgb.shape[-3:])
     rgb_gt = rgb_gt.view(-1, *rgb_gt.shape[-3:])
@@ -104,14 +130,16 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
         future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask)
         future_perp = executor.submit(compute_perceptual_loss, args, rgb_gt, rgb_pred, opt)
         future_contrastive = executor.submit(compute_contrastive_loss, args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text, mask)
-        future_smooth = executor.submit(compute_smooth_loss, rgb_pred, mask)
-        
-        concurrent.futures.wait([future_dir_clip, future_perp, future_contrastive, future_smooth], return_when=concurrent.futures.ALL_COMPLETED)
+        future_smoothness = executor.submit(compute_smoothness_loss, args, rgb_pred, mask)
+        future_sharpness = executor.submit(compute_sharpness_loss, args, rgb_pred, rgb_gt, mask)
+
+        concurrent.futures.wait([future_dir_clip, future_perp, future_contrastive, future_smoothness, future_sharpness], return_when=concurrent.futures.ALL_COMPLETED)
 
         losses["clip"] = future_dir_clip.result()
         losses["perceptual"] = future_perp.result()
         losses["contrastive"] = future_contrastive.result()
-        losses["smooth"] = future_smooth.result()
+        losses["smooth"] = future_smoothness.result()
+        losses["sharp"] = future_sharpness.result()
     
     loss = sum(losses.values()) * args.finetune.w_style
 
@@ -181,7 +209,8 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
                     "clip": f"{losses['clip']:.{5}f}",
                     "perceptual": f"{losses['perceptual']:.{5}f}",
                     "contrastive": f"{losses['contrastive']:.{5}f}",
-                    "smooth": f"{losses['smooth']:.{5}f}"
+                    "smooth": f"{losses['smooth']:.{5}f}",
+                    "sharp": f"{losses['sharp']:.{5}f}"
                 }
                 progress_bar.set_postfix(l_dict)
 
