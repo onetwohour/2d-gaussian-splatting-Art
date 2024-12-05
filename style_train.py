@@ -60,22 +60,34 @@ def create_fine_neg_texts(args):
     all_texts = results["base"]
     return all_texts
 
+def gaussian_blur(image, kernel_size=5, sigma=1.0):
+    x = torch.arange(-kernel_size // 2 + 1, kernel_size // 2 + 1, dtype=torch.float32)
+    gaussian = torch.exp(-(x**2) / (2 * sigma**2))
+    kernel1d = gaussian / gaussian.sum()
+    
+    kernel2d = torch.outer(kernel1d, kernel1d)
+    kernel2d = kernel2d.expand(image.shape[1], 1, kernel_size, kernel_size)
+    
+    blurred_image = F.conv2d(
+        image,
+        kernel2d.to(image.device),
+        padding=kernel_size // 2,
+        groups=image.shape[1],
+    )
+
+    return blurred_image
+
 def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask):
-    dir_clip_loss = loss_dict["clip"](rgb_gt * mask, s_text, rgb_pred * mask, t_text)
-    Ll1 = l1_loss(rgb_pred, rgb_gt)
-    return (dir_clip_loss * 0.8 + Ll1 * 0.2) * args.finetune.w_clip * mask.float().mean()
+    dir_clip_loss = loss_dict["clip"](rgb_gt, s_text, rgb_pred.clone() * mask, t_text)
+    Ll1 = l1_loss(gaussian_blur(rgb_pred), gaussian_blur(rgb_gt))
+    return (dir_clip_loss * 0.5 + Ll1 * 0.5) * args.finetune.w_clip * mask.float().mean()
 
 def compute_perceptual_loss(args, rgb_gt, rgb_pred, opt):
     loss = opt.lambda_dssim * (1.0 - ssim(rgb_pred, rgb_gt))
     return loss * args.finetune.w_perceptual
 
-def compute_contrastive_loss(args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text, mask):
-    s_text = random.choice(neg_texts)
-    contrastive_loss = loss_dict["contrastive"](rgb_gt * mask, s_text, rgb_pred * mask, t_text)
-    return contrastive_loss * args.finetune.w_contrastive * mask.float().mean()
-
 def compute_smoothness_loss(args, rgb_pred, mask):
-    rgb_pred = rgb_pred * mask
+    rgb_pred = rgb_pred.clone() * mask
     laplacian_kernel = torch.tensor([[[[0, 1, 0], 
                                         [1, -4, 1], 
                                         [0, 1, 0]]]], dtype=torch.float32, device=rgb_pred.device)
@@ -89,8 +101,8 @@ def compute_sharpness_loss(args, rgb_pred, rgb_gt, mask):
     def rgb_to_grayscale(image):
         return 0.2989 * image[:, 0, :, :] + 0.5870 * image[:, 1, :, :] + 0.1140 * image[:, 2, :, :]
 
-    rgb_pred = rgb_to_grayscale(rgb_pred * mask).unsqueeze(1)
-    rgb_gt = rgb_to_grayscale(rgb_gt * mask).unsqueeze(1)
+    rgb_pred = rgb_to_grayscale(rgb_pred.clone() * mask).unsqueeze(1)
+    rgb_gt = rgb_to_grayscale(rgb_gt).unsqueeze(1)
 
     sobel_x = torch.tensor([[[[-1, 0, 1], 
                               [-2, 0, 2], 
@@ -132,15 +144,13 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
     with concurrent.futures.ThreadPoolExecutor() as executor:
         future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask)
         future_perp = executor.submit(compute_perceptual_loss, args, rgb_gt, rgb_pred, opt)
-        future_contrastive = executor.submit(compute_contrastive_loss, args, loss_dict, rgb_gt, rgb_pred, neg_texts, t_text, mask)
         future_smoothness = executor.submit(compute_smoothness_loss, args, rgb_pred, mask)
         future_sharpness = executor.submit(compute_sharpness_loss, args, rgb_pred, rgb_gt, mask)
 
-        concurrent.futures.wait([future_dir_clip, future_perp, future_contrastive, future_smoothness, future_sharpness], return_when=concurrent.futures.ALL_COMPLETED)
+        concurrent.futures.wait([future_dir_clip, future_perp, future_smoothness, future_sharpness], return_when=concurrent.futures.ALL_COMPLETED)
 
         losses["clip"] = future_dir_clip.result()
         losses["perceptual"] = future_perp.result()
-        losses["contrastive"] = future_contrastive.result()
         losses["smooth"] = future_smoothness.result()
         losses["sharp"] = future_sharpness.result()
     

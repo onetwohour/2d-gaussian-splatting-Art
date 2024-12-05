@@ -1,4 +1,6 @@
+import random
 import torch
+import torch.nn.functional as F
 import clip
 from PIL import Image
 import torchvision.transforms as transforms
@@ -253,22 +255,6 @@ class CLIPLoss(torch.nn.Module):
 
         return self.direction_loss(edit_direction, self.text_direction).mean()
 
-    def clip_distance_loss(self, src_img: torch.Tensor, source_class: str, target_img: torch.Tensor, target_class: str):
-        if self.text_distance is None:
-            self.text_distance = self.compute_text_direction(source_class, target_class, norm=False) ** 2
-
-            #print (self.text_distance)
-        src_encoding = self.get_image_features(src_img, norm=False)
-        target_encoding = self.get_image_features(target_img, norm=False)
-
-        edit_distance = self.scale * (target_encoding - src_encoding) ** 2
-
-        distance = (edit_distance - self.text_distance) ** 2
-        print (distance.mean())
-        return distance.mean()
-
-        #return self.distance_loss(edit_distance, self.text_distance).mean()
-
     def compute_feature_direction(self):
         feature_direction = (self.tar_features - self.src_features).mean(axis=0, keepdim=True)
         feature_direction /= feature_direction.norm(dim=-1, keepdim=True)
@@ -290,15 +276,17 @@ class CLIPLoss(torch.nn.Module):
 
         return self.direction_loss(edit_direction, self.feature_direction.detach()).mean()
 
-    def forward_features(self, src_img: torch.Tensor, target_img: torch.Tensor):
-        loss = self.clip_feature_directional_loss(src_img, target_img)
-        return loss
-
     def forward(self, src_img: torch.Tensor, source_class: str, target_img: torch.Tensor, target_class: str):
         loss = self.clip_directional_loss(src_img, source_class, target_img, target_class)
+        size = max(224, min(src_img.size(-1), src_img.size(-2)))
+        num_patches = 12
+        patches = []
 
-        if self.use_distance:
-            loss_distance = 1.0 * self.clip_distance_loss(src_img, source_class, target_img, target_class)
-            print("loss distance: ", loss_distance.item())
-            loss = loss + loss_distance
+        for _ in range(num_patches):
+            x, y = random.randint(0, target_img.size(-2) - size), random.randint(0, target_img.size(-1) - size)
+            patches.append(target_img[:, :, x:x+size, y:y+size])
+            
+        patches = torch.cat(patches)
+        loss += self.clip_directional_loss(src_img, source_class, patches, target_class).mean()
+
         return loss
