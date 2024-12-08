@@ -4,8 +4,8 @@ import sys
 import uuid
 import torch
 import torch.nn.functional as F
+from CLIPStyler import StyleTransfer
 from scene import Scene, GaussianModel
-import random 
 from random import randint
 from tqdm import tqdm
 from gaussian_renderer import render, network_gui
@@ -60,27 +60,10 @@ def create_fine_neg_texts(args):
     all_texts = results["base"]
     return all_texts
 
-def gaussian_blur(image, kernel_size=5, sigma=1.0):
-    x = torch.arange(-kernel_size // 2 + 1, kernel_size // 2 + 1, dtype=torch.float32)
-    gaussian = torch.exp(-(x**2) / (2 * sigma**2))
-    kernel1d = gaussian / gaussian.sum()
-    
-    kernel2d = torch.outer(kernel1d, kernel1d)
-    kernel2d = kernel2d.expand(image.shape[1], 1, kernel_size, kernel_size)
-    
-    blurred_image = F.conv2d(
-        image,
-        kernel2d.to(image.device),
-        padding=kernel_size // 2,
-        groups=image.shape[1],
-    )
-
-    return blurred_image
-
-def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask):
+def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask, style_net):
     dir_clip_loss = loss_dict["clip"](rgb_gt, s_text, rgb_pred.clone() * mask, t_text)
-    Ll1 = l1_loss(gaussian_blur(rgb_pred), gaussian_blur(rgb_gt))
-    return (dir_clip_loss * 0.5 + Ll1 * 0.5) * args.finetune.w_clip * mask.float().mean()
+    Ll1 = l1_loss(F.interpolate(rgb_pred, (512, 512), mode="bicubic", align_corners=False), style_net.stylize(rgb_gt))
+    return (dir_clip_loss * 0.3 + Ll1 * 0.7) * args.finetune.w_clip * mask.float().mean()
 
 def compute_perceptual_loss(args, rgb_gt, rgb_pred, opt):
     loss = opt.lambda_dssim * (1.0 - ssim(rgb_pred, rgb_gt))
@@ -125,7 +108,7 @@ def compute_sharpness_loss(args, rgb_pred, rgb_gt, mask):
     sharpness_loss = (grad_diff_x + grad_diff_y).mean()
     return sharpness_loss * args.finetune.w_sharp * mask.float().mean()
 
-def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, opt, background):
+def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, neg_texts, opt, background, style_net):
     """
     Calculate CLIP-driven style losses for Gaussian Splatting.
     """
@@ -142,12 +125,12 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
     mask = (rgb_gt != background).any(dim=1, keepdim=True).repeat(1, 3, 1, 1)
 
     with concurrent.futures.ThreadPoolExecutor() as executor:
-        future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask)
+        future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask, style_net)
         future_perp = executor.submit(compute_perceptual_loss, args, rgb_gt, rgb_pred, opt)
         future_smoothness = executor.submit(compute_smoothness_loss, args, rgb_pred, mask)
         future_sharpness = executor.submit(compute_sharpness_loss, args, rgb_pred, rgb_gt, mask)
 
-        concurrent.futures.wait([future_dir_clip, future_perp, future_smoothness, future_sharpness], return_when=concurrent.futures.ALL_COMPLETED)
+        concurrent.futures.wait([future_dir_clip, future_perp], return_when=concurrent.futures.ALL_COMPLETED)
 
         losses["clip"] = future_dir_clip.result()
         losses["perceptual"] = future_perp.result()
@@ -159,6 +142,9 @@ def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, ne
     return loss, losses
 
 def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, config):
+    style_net = StyleTransfer(os.path.join(dataset.source_path, dataset.images), config.finetune.target_text, config.finetune.src_text, 12)
+    style_net.train()
+
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
     gaussians = GaussianModel(dataset.sh_degree, style_train=True)
@@ -207,7 +193,7 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         normal_loss = opt.lambda_normal * (normal_error).mean()
         dist_loss = opt.lambda_dist * (rend_dist).mean()
 
-        style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, opt, background)
+        style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, neg_list, opt, background, style_net)
 
         loss = style_loss + normal_loss + dist_loss
         loss.backward()
@@ -231,7 +217,7 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
             if iteration == opt.iterations:
                 progress_bar.close()
 
-            training_report(tb_writer, iteration, loss, calc_style_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), config, loss_dict, neg_list, opt)
+            training_report(tb_writer, iteration, loss, calc_style_loss, iter_start.elapsed_time(iter_end), testing_iterations, scene, render, (pipe, background), config, loss_dict, neg_list, opt, style_net)
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
@@ -268,7 +254,7 @@ def prepare_output_and_logger(args):
     return tb_writer
 
 @torch.no_grad()
-def training_report(tb_writer, iteration, loss, fn_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, conf, loss_dict, neg_list, opt):
+def training_report(tb_writer, iteration, loss, fn_loss, elapsed, testing_iterations, scene : Scene, renderFunc, renderArgs, conf, loss_dict, neg_list, opt, style_net):
     if tb_writer:
         tb_writer.add_scalar('train_loss_patches/total_loss', loss.item(), iteration)
         tb_writer.add_scalar('iter_time', elapsed, iteration)
@@ -314,7 +300,7 @@ def training_report(tb_writer, iteration, loss, fn_loss, elapsed, testing_iterat
                         if iteration == testing_iterations[0]:
                             tb_writer.add_images(config['name'] + "_view_{}/ground_truth".format(viewpoint.image_name), gt_image[None], global_step=iteration)
 
-                    loss_test += fn_loss(image, gt_image, conf, loss_dict, neg_list, opt, renderArgs[1])[0].mean().double()
+                    loss_test += fn_loss(image, gt_image, conf, loss_dict, neg_list, opt, renderArgs[1], style_net)[0].mean().double()
                     psnr_test += psnr(image, gt_image).mean().double()
 
                 psnr_test /= len(config['cameras'])

@@ -254,28 +254,7 @@ class CLIPLoss(torch.nn.Module):
         edit_direction /= edit_direction.clone().norm(dim=-1, keepdim=True)
 
         return self.direction_loss(edit_direction, self.text_direction).mean()
-
-    def compute_feature_direction(self):
-        feature_direction = (self.tar_features - self.src_features).mean(axis=0, keepdim=True)
-        feature_direction /= feature_direction.norm(dim=-1, keepdim=True)
-
-        # norm = True
-        feature_direction /= feature_direction.norm(dim=-1, keepdim=True)
-
-        return feature_direction
-
-    def clip_feature_directional_loss(self, src_img: torch.Tensor, target_img: torch.Tensor):
-        if self.feature_direction is None:
-            self.feature_direction = self.compute_feature_direction()
-
-        src_encoding = self.get_image_features(src_img)
-        target_encoding = self.get_image_features(target_img)
-
-        edit_direction = (target_encoding - src_encoding)
-        edit_direction /= edit_direction.clone().norm(dim=-1, keepdim=True)
-
-        return self.direction_loss(edit_direction, self.feature_direction.detach()).mean()
-
+    
     def forward(self, src_img: torch.Tensor, source_class: str, target_img: torch.Tensor, target_class: str):
         loss = self.clip_directional_loss(src_img, source_class, target_img, target_class)
         size = max(224, min(src_img.size(-1), src_img.size(-2)))
@@ -287,6 +266,6 @@ class CLIPLoss(torch.nn.Module):
             patches.append(target_img[:, :, x:x+size, y:y+size])
             
         patches = torch.cat(patches)
-        loss += self.clip_directional_loss(src_img, source_class, patches, target_class).mean()
+        loss += self.clip_directional_loss(src_img, source_class, patches, target_class)
 
         return loss
