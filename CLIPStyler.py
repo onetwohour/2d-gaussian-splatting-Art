@@ -1,5 +1,4 @@
 import os
-import random
 import torch
 import torch.nn
 import torch.optim as optim
@@ -10,6 +9,7 @@ import clip
 from PIL import Image
 import torchvision.transforms.functional as TF
 from tqdm import tqdm
+import matplotlib.pyplot as plt
 
 class StyleTransfer:
     def __init__(self, content_path: str, target_text: str, source_text: str, num_crops: int):
@@ -29,12 +29,12 @@ class StyleTransfer:
         self.lambda_tv = 2e-3
         self.lambda_rgb = 2000
         self.lr = 5e-4
-        self.max_step = 200
+        self.max_step = 40
         self.thresh = 0.7
 
         self.style_net = StyleNet.UNet().to(self.device)
         self.optimizer = optim.Adam(self.style_net.parameters(), lr=self.lr)
-        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=self.max_step, gamma=0.5)
+        self.scheduler = torch.optim.lr_scheduler.StepLR(self.optimizer, step_size=self.max_step // 3, gamma=0.5)
 
         self.cropper = transforms.Compose([
             transforms.RandomCrop(self.crop_size)
@@ -210,6 +210,7 @@ class StyleTransfer:
         images = self.load_images(self.content_path)
         prompt = self.target_text
         source = self.source_text
+        self.VGG.to(self.device)
 
         with torch.no_grad():
             template_text = self.compose_text_with_templates(prompt)
@@ -237,9 +238,7 @@ class StyleTransfer:
 
                 reg_tv = self.lambda_tv * self.get_image_prior_losses(target)
 
-                blurred_target = TF.gaussian_blur(target, kernel_size=31)
-                blurred_content = TF.gaussian_blur(content_image.to(self.device), kernel_size=31)
-                color_preservation_loss = F.l1_loss(blurred_target, blurred_content)
+                color_preservation_loss = F.l1_loss(target, content_image.to(self.device))
 
                 total_loss = self.lambda_patch * loss_patch + self.lambda_c * content_loss + reg_tv + self.lambda_dir * loss_glob + self.lambda_rgb * color_preservation_loss
                 self.optimizer.zero_grad()
@@ -247,7 +246,19 @@ class StyleTransfer:
                 self.optimizer.step()
             self.scheduler.step()
 
+            if step % 20 == 0:
+                output_image = target.clone()
+                output_image = torch.clamp(output_image, 0, 1)
+                output_image = TF.adjust_contrast(output_image, 1.5).squeeze(0)
+                os.makedirs("./StyleNet_OUTPUT", exist_ok=True)
+                plt.imshow(TF.to_pil_image(output_image))
+                plt.savefig(f"./StyleNet_OUTPUT/{step}.png")
+                plt.show()
+        
+        self.VGG.to("cpu")
+
     def stylize(self, img: torch.Tensor):
-        result = self.style_net(F.interpolate(img, (512, 512), mode="bicubic", align_corners=False), use_sigmoid=True).to("cpu")
-        result = torch.clamp(result, 0, 1).squeeze(0)
+        with torch.no_grad():
+            result = self.style_net(F.interpolate(img, (512, 512), mode="bicubic", align_corners=False), use_sigmoid=True).to("cpu")
+            result = torch.clamp(result, 0, 1).squeeze(0)
         return TF.to_tensor(TF.to_pil_image(result)).to(img).unsqueeze(0)
