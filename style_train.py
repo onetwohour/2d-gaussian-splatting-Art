@@ -108,6 +108,16 @@ def compute_sharpness_loss(args, rgb_pred, rgb_gt, mask):
     sharpness_loss = (grad_diff_x + grad_diff_y).mean()
     return sharpness_loss * args.finetune.w_sharp * mask.float().mean()
 
+def find_nth_occurrence(lst, n):
+    count = -1
+    for i, v in enumerate(lst):
+        if v:
+            count += 1
+            if count == n:
+                lst[i] = False
+                return i
+    return -1 
+
 def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, stylized, opt, background):
     """
     Calculate CLIP-driven style losses for Gaussian Splatting.
@@ -161,13 +171,14 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
     iter_end = torch.cuda.Event(enable_timing = True)
 
     viewpoint_stack = None
+    index_stack = None
     stylized_stack = {}
     ema_loss_for_log = 0.0
 
-    contrastive_loss = ContrastiveLoss(distance_type="cosine")
-    clip_loss = CLIPLoss()
-    loss_dict = {'contrastive': contrastive_loss, 'clip': clip_loss}
-    neg_list = create_fine_neg_texts(config)
+    # contrastive_loss = ContrastiveLoss(distance_type="cosine")
+    # clip_loss = CLIPLoss()
+    # loss_dict = {'contrastive': contrastive_loss, 'clip': clip_loss}
+    # neg_list = create_fine_neg_texts(config)
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -180,6 +191,7 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         # Pick a random Camera
         if not viewpoint_stack:
             viewpoint_stack = scene.getTrainCameras().copy()
+            index_stack = [True for _ in range(len(viewpoint_stack))]
         
         idx = randint(0, len(viewpoint_stack)-1)
         viewpoint_cam = viewpoint_stack.pop(idx)
@@ -188,8 +200,12 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         image = render_pkg["render"]
         
         gt_image = viewpoint_cam.original_image.cuda()
+        idx = find_nth_occurrence(index_stack, idx)
         if stylized_stack.get(idx) is None:
             stylized_stack[idx] = style_net.stylize(gt_image.view(-1, *gt_image.shape[-3:]))
+
+        Ll1 = l1_loss(image, stylized_stack[idx])
+        loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
 
         rend_dist = render_pkg["rend_dist"]
         rend_normal  = render_pkg['rend_normal']
@@ -198,9 +214,9 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         normal_loss = opt.lambda_normal * (normal_error).mean()
         dist_loss = opt.lambda_dist * (rend_dist).mean()
 
-        style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, stylized_stack[idx], opt, background)
+        # style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, stylized_stack[idx], opt, background)
 
-        loss = style_loss + normal_loss + dist_loss
+        loss = loss + normal_loss + dist_loss
         loss.backward()
 
         iter_end.record()
@@ -210,11 +226,9 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
 
             if iteration % 10 == 0:
                 l_dict = {
-                    "clip": f"{losses['clip']:.{5}f}",
-                    "perceptual": f"{losses['perceptual']:.{5}f}",
-                    "contrastive": f"{losses['contrastive']:.{5}f}",
-                    "smooth": f"{losses['smooth']:.{5}f}",
-                    "sharp": f"{losses['sharp']:.{5}f}"
+                    "loss": f"{loss:.{5}f}",
+                    "normal_loss": f"{normal_loss:.{5}f}",
+                    "dist_loss": f"{dist_loss:.{5}f}"
                 }
                 progress_bar.set_postfix(l_dict)
 

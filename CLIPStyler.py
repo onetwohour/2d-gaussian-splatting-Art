@@ -161,9 +161,13 @@ class StyleTransfer:
     def load_images(self, img_path):
         images = []
         for img in os.listdir(img_path):
-            image = Image.open(os.path.join(img_path, img)).resize((512, 512))
+            image = Image.open(os.path.join(img_path, img))
+            if image.size[0] % 16 or image.size[1] % 16:
+                image = image.resize((torch.ceil(torch.tensor(image.size) / 16) * 8).to(int).tolist())
+            else:
+                image = image.resize((torch.tensor(image.size) // 2).to(int).tolist())
             transform = transforms.ToTensor()
-            images.append(transform(image)[:3, :, :].unsqueeze(0).to(self.device))
+            images.append(transform(image)[:3, :, :].unsqueeze(0))
         return images
     
     def get_clip_text_features(self, template_text):
@@ -211,6 +215,7 @@ class StyleTransfer:
         prompt = self.target_text
         source = self.source_text
         self.VGG.to(self.device)
+        self.style_net.train()
 
         with torch.no_grad():
             template_text = self.compose_text_with_templates(prompt)
@@ -221,12 +226,13 @@ class StyleTransfer:
 
         for step in tqdm(range(self.max_step + 1)):
             for content_image in images:
+                content_image = content_image.to(self.device)
                 content_features = self.get_features(self.img_normalize(content_image), self.VGG)
 
                 source_features = self.clip_model.encode_image(self.clip_normalize(content_image))
                 source_features /= source_features.clone().norm(dim=-1, keepdim=True)
 
-                target = self.style_net(content_image, use_sigmoid=True).to(self.device)
+                target = self.style_net(content_image, use_sigmoid=True)
                 target.requires_grad_(True)
 
                 target_features = self.get_features(self.img_normalize(target), self.VGG)
@@ -238,12 +244,14 @@ class StyleTransfer:
 
                 reg_tv = self.lambda_tv * self.get_image_prior_losses(target)
 
-                color_preservation_loss = F.l1_loss(target, content_image.to(self.device))
+                color_preservation_loss = F.l1_loss(target, content_image)
 
                 total_loss = self.lambda_patch * loss_patch + self.lambda_c * content_loss + reg_tv + self.lambda_dir * loss_glob + self.lambda_rgb * color_preservation_loss
                 self.optimizer.zero_grad()
                 total_loss.backward()
                 self.optimizer.step()
+                content_image.to("cpu")
+
             self.scheduler.step()
 
             if step % 20 == 0:
@@ -258,7 +266,14 @@ class StyleTransfer:
         self.VGG.to("cpu")
 
     def stylize(self, img: torch.Tensor):
-        with torch.no_grad():
-            result = self.style_net(F.interpolate(img, (512, 512), mode="bicubic", align_corners=False), use_sigmoid=True).to("cpu")
-            result = torch.clamp(result, 0, 1).squeeze(0)
-        return TF.to_tensor(TF.to_pil_image(result)).to(img).unsqueeze(0)
+        self.style_net.eval()
+        shape = img.shape[2:]
+        if shape[0] % 16 or shape[1] % 16:
+            img = F.interpolate(img, (torch.ceil(torch.tensor(shape) / 16) * 8).to(int).tolist(), mode="bicubic", align_corners=False)
+        else:
+            img = F.interpolate(img, (torch.tensor(shape) // 2).to(int).tolist(), mode="bicubic", align_corners=False)
+        result = self.style_net(img, use_sigmoid=True).to("cpu")
+        result = torch.clamp(result, 0, 1)
+        result = TF.adjust_contrast(result, 1.5).squeeze(0)
+        result = TF.to_pil_image(result).resize(shape[::-1])
+        return TF.to_tensor(result).to(self.device).unsqueeze(0)
