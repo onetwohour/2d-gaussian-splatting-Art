@@ -3,19 +3,14 @@ import os
 import sys
 import uuid
 import torch
-import torch.nn.functional as F
 from CLIPStyler import StyleTransfer
 from scene import Scene, GaussianModel
 from random import randint
 from tqdm import tqdm
 from gaussian_renderer import render, network_gui
-from criteria.clip_loss import CLIPLoss
-from criteria.constrative_loss import ContrastiveLoss
 from utils import io_util
-import concurrent.futures
 from argparse import ArgumentParser, Namespace
 from utils.general_utils import safe_state
-from utils.image_utils import psnr
 from utils.loss_utils import l1_loss, ssim
 from arguments import ModelParams, PipelineParams, OptimizationParams
 try:
@@ -23,90 +18,6 @@ try:
     TENSORBOARD_FOUND = True
 except ImportError:
     TENSORBOARD_FOUND = False
-
-def create_fine_neg_texts(args):
-    path = "criteria/neg_text.txt"
-    results = {}
-    curr_key = 0
-    with open(path, 'r') as fr:
-        contents = fr.readlines()
-        for item in contents:
-            item = item.strip()
-            if item.startswith("#"):
-                curr_key = item[1:]
-                results[curr_key] = []
-            else:
-                results[curr_key].append(item.split(".")[1])
-        
-    all_texts = []
-    # remove_ids = [] 
-    # ttext = args.finetune.target_text.lower()
-    # if 'botero' in ttext or 'monalisa' in ttext or 'portrait' in ttext or 'painting' in ttext:
-    #     remove_ids = ['portrait']
-    # elif 'zombie' in ttext:
-    #     remove_ids = ['zombie']
-    # elif 'wolf' in ttext:
-    #     remove_ids = ['wolf']
-    # elif 'pixlar' in ttext or 'disney' in ttext:
-    #     remove_ids = ['disney']
-    # elif 'sketch' in ttext:
-    #     remove_ids = ['sketch'] 
-
-    # for key in results:
-    #     if key not in remove_ids:
-    #     #if key in remove_ids:
-    #         all_texts += results[key]
-
-    all_texts = results["base"]
-    return all_texts
-
-def compute_dir_clip_loss(args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask, stylized):
-    dir_clip_loss = loss_dict["clip"](rgb_gt, s_text, rgb_pred.clone() * mask, t_text)
-    Ll1 = l1_loss(F.interpolate(rgb_pred, (512, 512), mode="bicubic", align_corners=False), stylized)
-    return (dir_clip_loss * 0.3 + Ll1 * 0.7) * args.finetune.w_clip * mask.float().mean()
-
-def compute_perceptual_loss(args, rgb_gt, rgb_pred, opt):
-    loss = opt.lambda_dssim * (1.0 - ssim(rgb_pred, rgb_gt))
-    return loss * args.finetune.w_perceptual
-
-def compute_smoothness_loss(args, rgb_pred, mask):
-    rgb_pred = rgb_pred.clone() * mask
-    laplacian_kernel = torch.tensor([[[[0, 1, 0], 
-                                        [1, -4, 1], 
-                                        [0, 1, 0]]]], dtype=torch.float32, device=rgb_pred.device)
-    laplacian_kernel = laplacian_kernel.repeat(*rgb_pred.shape[:2], 1, 1)
-    laplacian_output = F.conv2d(rgb_pred, laplacian_kernel, padding=1, groups=1)
-    
-    laplacian_loss = torch.abs(laplacian_output).mean()
-    return laplacian_loss * args.finetune.w_smooth * mask.float().mean()
-
-def compute_sharpness_loss(args, rgb_pred, rgb_gt, mask):
-    def rgb_to_grayscale(image):
-        return 0.2989 * image[:, 0, :, :] + 0.5870 * image[:, 1, :, :] + 0.1140 * image[:, 2, :, :]
-
-    rgb_pred = rgb_to_grayscale(rgb_pred.clone() * mask).unsqueeze(1)
-    rgb_gt = rgb_to_grayscale(rgb_gt).unsqueeze(1)
-
-    sobel_x = torch.tensor([[[[-1, 0, 1], 
-                              [-2, 0, 2], 
-                              [-1, 0, 1]]]], dtype=torch.float32, device=rgb_pred.device)
-    sobel_y = torch.tensor([[[[-1, -2, -1], 
-                              [ 0,  0,  0], 
-                              [ 1,  2,  1]]]], dtype=torch.float32, device=rgb_pred.device)
-
-    sobel_x = sobel_x.repeat(*rgb_pred.shape[:2], 1, 1)
-    sobel_y = sobel_y.repeat(*rgb_pred.shape[:2], 1, 1)
-
-    grad_pred_x = F.conv2d(rgb_pred, sobel_x, padding=1, groups=1)
-    grad_pred_y = F.conv2d(rgb_pred, sobel_y, padding=1, groups=1)
-    grad_gt_x = F.conv2d(rgb_gt, sobel_x, padding=1, groups=1)
-    grad_gt_y = F.conv2d(rgb_gt, sobel_y, padding=1, groups=1)
-    
-    grad_diff_x = torch.abs(grad_pred_x - grad_gt_x)
-    grad_diff_y = torch.abs(grad_pred_y - grad_gt_y)
-    
-    sharpness_loss = (grad_diff_x + grad_diff_y).mean()
-    return sharpness_loss * args.finetune.w_sharp * mask.float().mean()
 
 def find_nth_occurrence(lst, n):
     count = -1
@@ -118,51 +29,18 @@ def find_nth_occurrence(lst, n):
                 return i
     return -1 
 
-def calc_style_loss(rgb: torch.Tensor, rgb_gt: torch.Tensor, args, loss_dict, stylized, opt, background):
-    """
-    Calculate CLIP-driven style losses for Gaussian Splatting.
-    """
-    loss = 0.0
-    losses = {"clip": 0.0, "perceptual": 0.0, "contrastive": 0.0, "smooth": 0.0, "sharp": 0.0}
-
-    rgb_pred = rgb.view(-1, *rgb.shape[-3:])
-    rgb_gt = rgb_gt.view(-1, *rgb_gt.shape[-3:])
-    
-    s_text = args.finetune.src_text
-    t_text = args.finetune.target_text
-
-    background = background.view(1, 3, 1, 1)
-    mask = (rgb_gt != background).any(dim=1, keepdim=True).repeat(1, 3, 1, 1)
-
-    with concurrent.futures.ThreadPoolExecutor() as executor:
-        future_dir_clip = executor.submit(compute_dir_clip_loss, args, loss_dict, rgb_gt, rgb_pred, s_text, t_text, mask, stylized)
-        future_perp = executor.submit(compute_perceptual_loss, args, rgb_gt, rgb_pred, opt)
-        future_smoothness = executor.submit(compute_smoothness_loss, args, rgb_pred, mask)
-        future_sharpness = executor.submit(compute_sharpness_loss, args, rgb_pred, rgb_gt, mask)
-
-        concurrent.futures.wait([future_dir_clip, future_perp, future_smoothness, future_sharpness], return_when=concurrent.futures.ALL_COMPLETED)
-
-        losses["clip"] = future_dir_clip.result()
-        losses["perceptual"] = future_perp.result()
-        losses["smooth"] = future_smoothness.result()
-        losses["sharp"] = future_sharpness.result()
-    
-    loss = sum(losses.values()) * args.finetune.w_style
-
-    return loss, losses
-
 def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, checkpoint_iterations, checkpoint, config):
     style_net = StyleTransfer(os.path.join(dataset.source_path, dataset.images), config.finetune.target_text, config.finetune.src_text, 12)
     style_net.train()
 
     first_iter = 0
     tb_writer = prepare_output_and_logger(dataset)
-    gaussians = GaussianModel(dataset.sh_degree, style_train=True)
+    gaussians = GaussianModel(dataset.sh_degree)
     scene = Scene(dataset, gaussians)
     gaussians.training_setup(opt)
-    assert checkpoint, "Gaussian model must be exist."
-    (model_params, _) = torch.load(checkpoint)
-    gaussians.restore(model_params, opt)
+    if checkpoint:
+        (model_params, first_iter) = torch.load(checkpoint)
+        gaussians.restore(model_params, opt)
 
     bg_color = [1, 1, 1] if dataset.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32, device="cuda")
@@ -174,11 +52,8 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
     index_stack = None
     stylized_stack = {}
     ema_loss_for_log = 0.0
-
-    # contrastive_loss = ContrastiveLoss(distance_type="cosine")
-    # clip_loss = CLIPLoss()
-    # loss_dict = {'contrastive': contrastive_loss, 'clip': clip_loss}
-    # neg_list = create_fine_neg_texts(config)
+    ema_dist_for_log = 0.0
+    ema_normal_for_log = 0.0
 
     progress_bar = tqdm(range(first_iter, opt.iterations), desc="Training progress")
     first_iter += 1
@@ -187,6 +62,9 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         iter_start.record()
 
         gaussians.update_learning_rate(iteration)
+
+        if iteration % 1000 == 0:
+            gaussians.oneupSHdegree()
 
         # Pick a random Camera
         if not viewpoint_stack:
@@ -197,8 +75,8 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         viewpoint_cam = viewpoint_stack.pop(idx)
         
         render_pkg = render(viewpoint_cam, gaussians, pipe, background)
-        image = render_pkg["render"]
-        
+        image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
+
         gt_image = viewpoint_cam.original_image.cuda()
         idx = find_nth_occurrence(index_stack, idx)
         if stylized_stack.get(idx) is None:
@@ -207,14 +85,15 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         Ll1 = l1_loss(image, stylized_stack[idx])
         loss = (1.0 - opt.lambda_dssim) * Ll1 + opt.lambda_dssim * (1.0 - ssim(image, gt_image))
 
+        lambda_normal = opt.lambda_normal if iteration > 7000 else 0.0
+        lambda_dist = opt.lambda_dist if iteration > 3000 else 0.0
+
         rend_dist = render_pkg["rend_dist"]
         rend_normal  = render_pkg['rend_normal']
         surf_normal = render_pkg['surf_normal']
         normal_error = (1 - (rend_normal * surf_normal).sum(dim=0))[None]
-        normal_loss = opt.lambda_normal * (normal_error).mean()
-        dist_loss = opt.lambda_dist * (rend_dist).mean()
-
-        # style_loss, losses = calc_style_loss(image, gt_image, config, loss_dict, stylized_stack[idx], opt, background)
+        normal_loss = lambda_normal * (normal_error).mean()
+        dist_loss = lambda_dist * (rend_dist).mean()
 
         loss = loss + normal_loss + dist_loss
         loss.backward()
@@ -223,14 +102,18 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
 
         with torch.no_grad():
             ema_loss_for_log = 0.4 * loss.item() + 0.6 * ema_loss_for_log
+            ema_dist_for_log = 0.4 * dist_loss.item() + 0.6 * ema_dist_for_log
+            ema_normal_for_log = 0.4 * normal_loss.item() + 0.6 * ema_normal_for_log
+
 
             if iteration % 10 == 0:
-                l_dict = {
-                    "loss": f"{loss:.{5}f}",
-                    "normal_loss": f"{normal_loss:.{5}f}",
-                    "dist_loss": f"{dist_loss:.{5}f}"
+                loss_dict = {
+                    "Loss": f"{ema_loss_for_log:.{5}f}",
+                    "distort": f"{ema_dist_for_log:.{5}f}",
+                    "normal": f"{ema_normal_for_log:.{5}f}",
+                    "Points": f"{len(gaussians.get_xyz)}"
                 }
-                progress_bar.set_postfix(l_dict)
+                progress_bar.set_postfix(loss_dict)
 
                 progress_bar.update(10)
             if iteration == opt.iterations:
@@ -239,6 +122,19 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
             if (iteration in saving_iterations):
                 print("\n[ITER {}] Saving Gaussians".format(iteration))
                 scene.save(iteration)
+
+
+            # Densification
+            if iteration < opt.densify_until_iter:
+                gaussians.max_radii2D[visibility_filter] = torch.max(gaussians.max_radii2D[visibility_filter], radii[visibility_filter])
+                gaussians.add_densification_stats(viewspace_point_tensor, visibility_filter)
+
+                if iteration > opt.densify_from_iter and iteration % opt.densification_interval == 0:
+                    size_threshold = 20 if iteration > opt.opacity_reset_interval else None
+                    gaussians.densify_and_prune(opt.densify_grad_threshold, opt.opacity_cull, scene.cameras_extent, size_threshold)
+                
+                if iteration % opt.opacity_reset_interval == 0 or (dataset.white_background and iteration == opt.densify_from_iter):
+                    gaussians.reset_opacity()
 
             # Optimizer step
             if iteration < opt.iterations:
