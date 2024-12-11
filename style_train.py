@@ -78,7 +78,7 @@ def style_training(dataset, opt, pipe, testing_iterations, saving_iterations, ch
         image, viewspace_point_tensor, visibility_filter, radii = render_pkg["render"], render_pkg["viewspace_points"], render_pkg["visibility_filter"], render_pkg["radii"]
 
         gt_image = viewpoint_cam.original_image.cuda()
-        mask = (gt_image.view(-1, *gt_image.shape[-3:]) != background).any(dim=1, keepdim=True).repeat(1, 3, 1, 1)
+        mask = (gt_image.view(-1, *gt_image.shape[-3:]) != background.view(1, 3, 1, 1)).any(dim=1, keepdim=True).repeat(1, 3, 1, 1)
         idx = find_nth_occurrence(index_stack, idx)
         if stylized_stack.get(idx) is None:
             stylized_stack[idx] = style_net.stylize(gt_image.view(-1, *gt_image.shape[-3:]))
